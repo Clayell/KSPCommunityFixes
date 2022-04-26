@@ -157,6 +157,7 @@
     <Compile Include="QoL\ToolbarShowHide.cs" />
     <Compile Include="QoL\DisableNewGameIntro.cs" />
     <Compile Include="QoL\NoIVA.cs" />
+    <Compile Include="QoL\BetterSAS.cs" />
     <Compile Include="Performance\OnDemandPartBuoyancy.cs" />
     <Compile Include="Performance\SceneLoadSpeedBoost.cs" />
     <Compile Include="Internal\PatchSettings.cs" />
