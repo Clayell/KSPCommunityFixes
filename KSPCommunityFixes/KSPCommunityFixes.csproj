@@ -90,13 +90,14 @@
     <Compile Include="BugFixes\ExtendedDeployableParts.cs" />
     <Compile Include="BugFixes\DeltaVHideWhenDisabled.cs" />
     <Compile Include="BugFixes\KerbalTooltipMaxSustainedG.cs" />
+    <Compile Include="BugFixes\GetPotentialTorqueFixes.cs" />
     <Compile Include="BugFixes\PackedPartsRotation.cs" />
     <Compile Include="BugFixes\PartStartStability.cs" />
     <Compile Include="BugFixes\PAWItemOrder.cs" />
-    <Compile Include="BugFixes\ReactionWheelsPotentialTorque.cs" />
     <Compile Include="BugFixes\RoboticsDrift.cs" />
     <Compile Include="BugFixes\ROCValidationOOR.cs" />
     <Compile Include="BugFixes\StockAlarmDescPreserveLineBreak.cs" />
+    <Compile Include="QoL\BetterSAS.cs" />
     <Compile Include="Modding\PersistentIConfigNode.cs" />
     <Compile Include="Modding\DockingPortLockedEvents.cs" />
     <Compile Include="Modding\OnSymmetryFieldChanged.cs" />
