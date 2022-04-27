@@ -1,50 +1,56 @@
-﻿using HarmonyLib;
-using System;
+﻿using System;
+using HarmonyLib;
 using System.Collections.Generic;
-using System.Runtime.InteropServices.WindowsRuntime;
 using UnityEngine;
+
+/*
+ This patch is a general rewrite of the stock implementations for `ITorqueProvider.GetPotentialTorque(out Vector3 pos, out Vector3 neg)`.
+ It follow these conventions :
+ - x is pitch, y is roll, z is yaw
+ - `pos` is the actuation induced torque for a positive FlightCtrlState (pitch = 1, roll, = 1 yaw = 1) control request
+ - `neg` is the actuation induced torque for a negative FlightCtrlState (pitch = -1, roll, = -1 yaw = -1) control request
+ - Contrary to the stock implementations, values are strictly the **actuation induced** torque.
+ - Positive values mean actuation will induce a torque in the desired direction. Negatives values mean that actuation will
+   induce a torque in the opposite direction. For example, a negative `pos.x` value mean that for a positive roll actuation
+   (ctrlState.roll = 1), the torque provider will produce a torque inducing a negative roll, essentially reducing the total
+   available torque in that direction. This can notably happen with the stock aero control surfaces, due to their control
+   scheme being only based on their relative position/orientation to the vessel CoM and ignoring other factors like AoA.
+   This mean a correct implementation of a `GetVesselPotentialTorque()` method is :
+     ```cs
+     foreach (ITorqueProvider torqueProvider)
+     {
+       torqueProvider.GetPotentialTorque(out Vector3 pos, out Vector3 neg);
+       vesselPosTorque += pos;
+       vesselNegTorque += neg;
+     }
+     if (vesselPosTorque.x < 0f) vesselPosTorque.x = 0f;
+     if (vesselPosTorque.y < 0f) vesselPosTorque.y = 0f;
+     if (vesselPosTorque.z < 0f) vesselPosTorque.z = 0f;
+     if (vesselNegTorque.x < 0f) vesselNegTorque.x = 0f;
+     if (vesselNegTorque.y < 0f) vesselNegTorque.y = 0f;
+     if (vesselNegTorque.z < 0f) vesselNegTorque.z = 0f;
+     ```
+
+ Quick review of how the stock implementations are handled in the modding ecosystem :
+ - *It seems* Mechjeb doesn't care about a value being from "pos" or "neg", it assume a negative value from either of the vector3 is a negative
+   torque component (ie, if "pos.x" or "neg.x" is negative, it add that as negative avaiable torque around x).
+   Ref : https://github.com/MuMech/MechJeb2/blob/f5c1193813da7d2e2e347f963dd4ee4b7fb11a90/MechJeb2/VesselState.cs#L1073-L1076
+   Ref2 : https://github.com/MuMech/MechJeb2/blob/f5c1193813da7d2e2e347f963dd4ee4b7fb11a90/MechJeb2/Vector6.cs#L82-L93
+ - kOS assume that the absolute value should be used.
+   (side note : kOS reimplements ModuleReactionWheel.GetPotentialTorque() to get around the authority limiter bug)
+   Ref : https://github.com/KSP-KOS/KOS/blob/7b7874153bc6c428404b3a1a913487b2fd0a9d99/src/kOS/Control/SteeringManager.cs#L658-L664
+ - TCA doesn't seem aware of the possibility of negative values, it assume they are positive.
+   (side note : TCA apply the authority limiter to the stock ModuleReactionWheel.GetPotentialTorque() results)
+   Ref : https://github.com/allista/ThrottleControlledAvionics/blob/b79a7372ab69616801f9953256b43ee872b90cf2/VesselProps/TorqueProps.cs#L167-L169
+ - Atmospheric Autopilot replace the stock module implementation by its own and doesn't use the interface at all (!!!)
+   Ref : https://github.com/Boris-Barboris/AtmosphereAutopilot/blob/master/AtmosphereAutopilot/SyncModuleControlSurface.cs
+ - FAR implements a replacement for ModuleControlSurface and consequently has a custom GetPotentialTorque() implementation.
+   It seems that it will *always* return positive "pos" values and negative "neg" values, and I've
+   Ref : https://github.com/dkavolis/Ferram-Aerospace-Research/blob/95e127ae140b4be9699da8783d24dd8db726d753/FerramAerospaceResearch/LEGACYferram4/FARControllableSurface.cs#L294-L300
+*/
 
 namespace KSPCommunityFixes.BugFixes
 {
-    // Judging from the VesselSAS.GetTotalVesselTorque() implementation, the convention seems to be that both pos and neg must be positive values.
-    // ModuleReactionWheel and ModuleGimbal follow that convention. ModuleRCS doesn't, but the implementation is 100% broken since forever and
-    // results are garbage anyway.
-
-    // This convention is NOT followed by the stock ModuleControlSurface.GetPotentialTorque() implementation, which will happily 
-    // return negative values both for "pos" and "neg".
-
-    // Quick review of how this is handled in the modding ecosystem :
-    // - *It seems* Mechjeb doesn't care about a value being from "pos" or "neg", it assume a negative value from either of the vector3 is a negative
-    //   torque component (ie, if "pos.x" or "neg.x" is negative, it add that as negative avaiable torque around x).
-    //   Ref : https://github.com/MuMech/MechJeb2/blob/f5c1193813da7d2e2e347f963dd4ee4b7fb11a90/MechJeb2/VesselState.cs#L1073-L1076
-    //   Ref2 : https://github.com/MuMech/MechJeb2/blob/f5c1193813da7d2e2e347f963dd4ee4b7fb11a90/MechJeb2/Vector6.cs#L82-L93
-    // - kOS assume that the absolute value should be used.
-    //   (side note : kOS reimplements ModuleReactionWheel.GetPotentialTorque() to get around the authority limiter bug)
-    //   Ref : https://github.com/KSP-KOS/KOS/blob/7b7874153bc6c428404b3a1a913487b2fd0a9d99/src/kOS/Control/SteeringManager.cs#L658-L664
-    // - TCA doesn't seem aware of the possibility of negative values, it assume they are positive.
-    //   (side note : TCA apply the authority limiter to the stock ModuleReactionWheel.GetPotentialTorque() results)
-    //   Ref : https://github.com/allista/ThrottleControlledAvionics/blob/b79a7372ab69616801f9953256b43ee872b90cf2/VesselProps/TorqueProps.cs#L167-L169
-    // - Atmospheric Autopilot replace the stock module implementation by its own and doesn't use the interface at all (!!!)
-    //   Ref : https://github.com/Boris-Barboris/AtmosphereAutopilot/blob/master/AtmosphereAutopilot/SyncModuleControlSurface.cs
-    // - FAR implements a replacement for ModuleControlSurface and consequently has a custom GetPotentialTorque() implentation.
-    //   The implementation will *always* return positive "pos" values and negative "neg" values
-    //   Ref : https://github.com/dkavolis/Ferram-Aerospace-Research/blob/95e127ae140b4be9699da8783d24dd8db726d753/FerramAerospaceResearch/LEGACYferram4/FARControllableSurface.cs#L294-L300
-
-    // I believe the only mod being "right" is kOS. The Mechjeb implementation works when used alongside FAR, but is wrong for stock. But the end, since
-    // MechJeb only keep the maximum absolute value between pos/neg, that error might end up not 
-
-    // All this being said, the implementation seems to output bery questionable results overall :
-    // - The stock AIRBRAKE never report any available torque (so I guess the implementation doesn't work for the derived ModuleAeroSurface module)
-    // - Placing an elevon parallel to the side of rocket (so it should be able to provide pitch or yaw torque) results in zero available torque
-
-    // As for the neg/pos direction convention, we are consistent with the ModuleGimbal.GetPotentialTorque() implementation, which return a "pos" value
-    // for a positive rotation around the axis (this is also consistent with the Unity left-handed coordinate system). ModuleControlSurface *seems* to
-    // follow the convention too, but this is hard to validate with certainty.
-
-
-    // - VERIFY THAT MODULEGIMBAL convention is to return the **actuation** torque (ie, check that a non-COM aligned engine return the same values as a COM aligned one)
-    // - our issue with modulecontrolsurface seems to be that it returns the total torque, not just the "potential" additional torque
-
     class GetPotentialTorqueFixes : BasePatch
     {
         protected override void ApplyPatches(ref List<PatchInfo> patches)
@@ -64,11 +70,13 @@ namespace KSPCommunityFixes.BugFixes
                 AccessTools.Method(typeof(ModuleControlSurface), nameof(ModuleControlSurface.GetPotentialTorque)),
                 this));
 
-#if DEBUG
             patches.Add(new PatchInfo(
-                PatchMethodType.Postfix,
+                PatchMethodType.Prefix,
                 AccessTools.Method(typeof(ModuleGimbal), nameof(ModuleGimbal.GetPotentialTorque)),
                 this));
+
+#if DEBUG
+
 
             patches.Add(new PatchInfo(
                 PatchMethodType.Prefix,
@@ -105,11 +113,11 @@ namespace KSPCommunityFixes.BugFixes
             pos = Vector3.zero;
             neg = Vector3.zero;
 
-            if (!__instance.moduleIsEnabled 
-                || !__instance.rcsEnabled 
-                || !__instance.rcs_active 
-                || __instance.IsAdjusterBreakingRCS() 
-                || __instance.isJustForShow 
+            if (!__instance.moduleIsEnabled
+                || !__instance.rcsEnabled
+                || !__instance.rcs_active
+                || __instance.IsAdjusterBreakingRCS()
+                || __instance.isJustForShow
                 || __instance.flameout
                 || (__instance.part.ShieldedFromAirstream && !__instance.shieldedCanThrust))
             {
@@ -200,27 +208,13 @@ namespace KSPCommunityFixes.BugFixes
         // This reimplementation fixes all the above issues.
         // It still has a few shortcomings. Notably, it partially reuse results from the previous FixedUpdate() and mix them with current values.
         // This mean the results are slightly wrong, but this saves quite a bit of extra processing in that already quite performance heavy method,
-        // and the error magnitude shoudln't matter for potential applications of GetPotentialTorque().
+        // and the error magnitude shouldn't matter for potential applications of GetPotentialTorque().
         // It shall also be noted that the result magnitude is an approximation when the actuation is clamped by the module (ie, when the control
         // surface neutral state isn't aligned with the airflow), with the error being greater when the allowed actuation is lower.
 
         // Note that the results can still return negative components. The meaning of a negative value is that the actuation of that component will
         // induce a torque in the opposite direction. For example, a negative pos.x value mean that for a positive roll actuation (ctrlState.roll > 0),
-        // the control surface will produce a torque incuding a negative roll, essentially reducing the total available torque is that direction.
-        // This become usefull when summing the total torque available on the vessel, and this mean the summing should be done as follow :
-
-        // foreach (ITorqueProvider torqueProvider)
-        // {
-        //   torqueProvider.GetPotentialTorque(out Vector3 pos, out Vector3 neg);
-        //   posTorque += pos;
-        //   negTorque += neg;
-        // }
-        // if (posTorque.x < 0f) posTorque.x = 0f;
-        // if (posTorque.y < 0f) posTorque.y = 0f;
-        // if (posTorque.z < 0f) posTorque.z = 0f;
-        // if (negTorque.x < 0f) negTorque.x = 0f;
-        // if (negTorque.y < 0f) negTorque.y = 0f;
-        // if (negTorque.z < 0f) negTorque.z = 0f;
+        // the control surface will produce a torque incuding a negative roll, essentially reducing the total available torque in that direction.
 
         static bool ModuleControlSurface_GetPotentialTorque_Prefix(ModuleControlSurface __instance, out Vector3 pos, out Vector3 neg)
         {
@@ -232,9 +226,11 @@ namespace KSPCommunityFixes.BugFixes
 
             if (__instance.displaceVelocity)
             {
-                // This case is for handling "propeller blade" control surfaces. Those have a completely different control
-                // scheme. This is the stock GetPotentialTorque() implementation for them, I've no idea how correct it is and
-                // just don't have the motivation to investigate.
+                // This case is for handling "propeller blade" control surfaces. Those have a completely different behavior and
+                // actuation scheme (and why this wasn't implemented as a separate module is beyond my understanding).
+                // This is the stock GetPotentialTorque() implementation for them, I've no idea how correct it is and just don't
+                // have the motivation to investigate.
+
                 Vector3 potentialForcePos = __instance.GetPotentialLift(true);
                 Vector3 potentialForceNeg = __instance.GetPotentialLift(false);
                 float magnitude = __instance.vesselBladeLiftReference.magnitude;
@@ -255,7 +251,7 @@ namespace KSPCommunityFixes.BugFixes
                 {
                     deployAngle = 0f;
                     neutralForce = __instance.baseLiftForce * __instance.ctrlSurfaceArea;
-                    neutralForce += GetDragForce(__instance, __instance.absDot, (float)__instance.part.machNumber);
+                    neutralForce += GetDragForce(__instance, __instance.absDot, (float) __instance.part.machNumber);
                 }
                 else
                 {
@@ -263,7 +259,7 @@ namespace KSPCommunityFixes.BugFixes
                     Vector3 rhsNeutral = Quaternion.AngleAxis(deployAngle, __instance.baseTransform.rotation * Vector3.right) * __instance.baseTransform.forward;
                     float dotNeutral = Vector3.Dot(__instance.nVel, rhsNeutral);
                     float absDotNeutral = Mathf.Abs(dotNeutral);
-                    float machNumber = (float)__instance.part.machNumber;
+                    float machNumber = (float) __instance.part.machNumber;
                     neutralForce = __instance.GetLiftVector(rhsNeutral, dotNeutral, absDotNeutral, __instance.Qlift, machNumber) * __instance.ctrlSurfaceArea;
                     neutralForce += GetDragForce(__instance, absDotNeutral, machNumber);
                 }
@@ -391,10 +387,10 @@ namespace KSPCommunityFixes.BugFixes
                     Vector3 rhs = new Vector3(comRelPos.x, 0f, comRelPos.z);
 
                     float rollActionPos = Vector3.Dot(Vector3.right, rhs)
-                                      * (1f - (Mathf.Abs(Vector3.Dot(rhs.normalized, Quaternion.Inverse(__instance.baseTransform.rotation) * __instance.vessel.ReferenceTransform.up)) * 0.5f + 0.5f))
-                                      * Mathf.Sign(Vector3.Dot(__instance.baseTransform.up, __instance.vessel.ReferenceTransform.up))
-                                      * Mathf.Sign(__instance.ctrlSurfaceRange)
-                                      * -1f;
+                                          * (1f - (Mathf.Abs(Vector3.Dot(rhs.normalized, Quaternion.Inverse(__instance.baseTransform.rotation) * __instance.vessel.ReferenceTransform.up)) * 0.5f + 0.5f))
+                                          * Mathf.Sign(Vector3.Dot(__instance.baseTransform.up, __instance.vessel.ReferenceTransform.up))
+                                          * Mathf.Sign(__instance.ctrlSurfaceRange)
+                                          * -1f;
 
                     rollActionPos = Mathf.Clamp(rollActionPos, -1f, 1f);
 
@@ -489,7 +485,7 @@ namespace KSPCommunityFixes.BugFixes
             dragScalar *= mcs.deflectionLiftCoeff;
             if (dragScalar != 0f && !float.IsNaN(dragScalar))
             {
-                dragScalar = (float)mcs.Qdrag * dragScalar * PhysicsGlobals.LiftDragMultiplier;
+                dragScalar = (float) mcs.Qdrag * dragScalar * PhysicsGlobals.LiftDragMultiplier;
                 return -mcs.nVel * dragScalar * mcs.ctrlSurfaceArea;
             }
 
@@ -498,28 +494,216 @@ namespace KSPCommunityFixes.BugFixes
 
         #endregion
 
-#if DEBUG
+        #region ModuleGimbal
 
-        static bool ModuleLiftingSurface_DestroyLiftAndDragArrows_Prefix() => false;
-
-        static void ModuleGimbal_GetPotentialTorque_Postfix(ModuleGimbal __instance, ref Vector3 pos, ref Vector3 neg)
+        static bool ModuleGimbal_GetPotentialTorque_Prefix(ModuleGimbal __instance, out Vector3 pos, out Vector3 neg)
         {
+            ModuleGimbal mg = __instance;
+
+            pos = Vector3.zero;
+            neg = Vector3.zero;
+
+            if (mg.gimbalLock || !mg.moduleIsEnabled)
+                return false;
+
+            if (mg.engineMultsList == null)
+                mg.CreateEngineList();
+
+            Vector3 currentCoM = mg.vessel.CurrentCoM;
+            Vector3 localCoM = mg.vessel.ReferenceTransform.InverseTransformPoint(currentCoM);
+            int transformIndex = mg.gimbalTransforms.Count;
+            while (transformIndex-- > 0)
+            {
+                Transform transform = mg.gimbalTransforms[transformIndex];
+                Vector3 gimbalToCoM = transform.position - currentCoM;
+                float gimbalToCoMDistance = gimbalToCoM.magnitude;
+                float gimbalToCoMAxisDistance = Vector3.ProjectOnPlane(gimbalToCoM, mg.vessel.ReferenceTransform.up).magnitude;
+                int engineIndex = mg.engineMultsList[transformIndex].Count;
+                while (engineIndex-- > 0)
+                {
+                    KeyValuePair<ModuleEngines, float> engineThrustMultiplier = mg.engineMultsList[transformIndex][engineIndex];
+                    float thrustForce = engineThrustMultiplier.Value * engineThrustMultiplier.Key.finalThrust;
+                    if (thrustForce > 0f)
+                    {
+                        Vector3 actuationAngles;
+                        float actuation;
+
+                        float pitchYawTorqueMagnitude = gimbalToCoMDistance * thrustForce;
+
+                        actuationAngles = mg.GimbalRotation(transform, Vector3.right, localCoM);
+                        actuation = Mathf.Sin(Mathf.Abs(actuationAngles.x) * Mathf.Deg2Rad) + Mathf.Sin(Mathf.Abs(actuationAngles.y) * Mathf.Deg2Rad);
+                        pos.x += actuation * pitchYawTorqueMagnitude;
+
+                        actuationAngles = mg.GimbalRotation(transform, -Vector3.right, localCoM);
+                        actuation = Mathf.Sin(Mathf.Abs(actuationAngles.x) * Mathf.Deg2Rad) + Mathf.Sin(Mathf.Abs(actuationAngles.y) * Mathf.Deg2Rad);
+                        neg.x += actuation * pitchYawTorqueMagnitude;
+
+                        actuationAngles = mg.GimbalRotation(transform, Vector3.forward, localCoM);
+                        actuation = Mathf.Sin(Mathf.Abs(actuationAngles.x) * Mathf.Deg2Rad) + Mathf.Sin(Mathf.Abs(actuationAngles.y) * Mathf.Deg2Rad);
+                        pos.z += actuation * pitchYawTorqueMagnitude;
+
+                        actuationAngles = mg.GimbalRotation(transform, -Vector3.forward, localCoM);
+                        actuation = Mathf.Sin(Mathf.Abs(actuationAngles.x) * Mathf.Deg2Rad) + Mathf.Sin(Mathf.Abs(actuationAngles.y) * Mathf.Deg2Rad);
+                        neg.z += actuation * pitchYawTorqueMagnitude;
+
+                        if (gimbalToCoMAxisDistance > mg.minRollOffset)
+                        {
+                            float rollTorqueMagnitude = gimbalToCoMAxisDistance * thrustForce;
+
+                            actuationAngles = mg.GimbalRotation(transform, Vector3.up, localCoM);
+                            actuation = Mathf.Sin(Mathf.Abs(actuationAngles.x) * Mathf.Deg2Rad) + Mathf.Sin(Mathf.Abs(actuationAngles.y) * Mathf.Deg2Rad);
+                            pos.y += actuation * rollTorqueMagnitude;
+
+                            actuationAngles = mg.GimbalRotation(transform, -Vector3.up, localCoM);
+                            actuation = Mathf.Sin(Mathf.Abs(actuationAngles.x) * Mathf.Deg2Rad) + Mathf.Sin(Mathf.Abs(actuationAngles.y) * Mathf.Deg2Rad);
+                            neg.y += actuation * rollTorqueMagnitude;
+                        }
+                    }
+                }
+            }
+
+            GetGimbalPotentialTorqueFixed(mg);
+
             TorqueUIModule ui = __instance.part.FindModuleImplementing<TorqueUIModule>();
             ui.pos = pos;
             ui.neg = neg;
+
+            return false;
         }
 
+        // Quaternion AtoB = B * Quaternion.Inverse(A);
+
+        // engine thrust :
+        // Transform transform = thrustTransforms[i];
+        // base.part.AddForceAtPosition(-transform.forward * finalThrust * thrustTransformMultipliers[i], transform.position);
+
+        private static void GetGimbalPotentialTorqueFixed(ModuleGimbal mg)
+        {
+            Vector3 predictedCoM = mg.vessel.CurrentCoM;
+
+            int transformIndex = mg.gimbalTransforms.Count;
+            while (transformIndex-- > 0)
+            {
+                Transform gimbalTransform = mg.gimbalTransforms[transformIndex];
+
+                // this is the neutral gimbalTransform.localRotation
+                Quaternion neutralLocalRot = mg.initRots[transformIndex];
+                Quaternion neutralWorldRot = gimbalTransform.parent.rotation * neutralLocalRot;
+                // get the rotation between the current gimbal rotation and the neutral rotation
+                Quaternion worldDiff = neutralWorldRot * Quaternion.Inverse(gimbalTransform.rotation);
+
+                Vector3 posTorque;
+                Vector3 negTorque;
+                Vector3 neutralTorque = Vector3.zero;
+
+                //posTorque -= neutralTorque;
+                //negTorque -= neutralTorque;
+
+
+                List<KeyValuePair<ModuleEngines, float>> engines = mg.engineMultsList[transformIndex];
+                foreach (KeyValuePair<ModuleEngines, float> engineThrustMultiplier in engines)
+                {
+                    ModuleEngines engine = engineThrustMultiplier.Key;
+                    float thrustMultiplier = engineThrustMultiplier.Value;
+                    float thrustMagnitude = engine.finalThrust * thrustMultiplier;
+
+                    if (thrustMagnitude <= 0f)
+                        continue;
+
+                    Vector3 neutralWorldTorque = Vector3.zero;
+                    Vector3 neutralThrustForce = Vector3.zero;
+
+                    Vector3 pitchPosTorque = Vector3.zero;
+                    Vector3 pitchNegTorque = Vector3.zero;
+                    Vector3 rollPosTorque = Vector3.zero;
+                    Vector3 rollNegTorque = Vector3.zero;
+                    Vector3 yawPosTorque = Vector3.zero;
+                    Vector3 yawNegTorque = Vector3.zero;
+
+                    TorqueUIModule ui = mg.part.FindModuleImplementing<TorqueUIModule>();
+
+                    
+                    foreach (Transform thrustTransform in engine.thrustTransforms)
+                    {
+                        // To get the "neutral" transform position, we need to walk back the transform hierarchy to correct for the current gimbal
+                        // rotation induced thrustTransform position offset. It's not critical to do it (see below as for why), but it would be weird
+                        // to have the end results varying slightly depending on the current actuation.
+                        // But note that when getting the actuated forces, we don't use the modified thrustTransform position. In most cases, the  
+                        // actuation induced position shift of the thrustTransform won't matter much, since the gimbal pivot - thrustTransform distance
+                        // is usally tiny compared to the CoM-thrustTransform distance.
+                        Vector3 thrustTransformPosition = gimbalTransform.position + (worldDiff * (thrustTransform.position - gimbalTransform.position));
+                        Vector3 trustPosFromCoM = thrustTransformPosition - predictedCoM;
+
+                        // get the neutral thrust force by removing the thrustTransform current actuation induced rotation 
+                        neutralThrustForce = worldDiff * (thrustTransform.forward * thrustMagnitude);
+
+                        // get the "natural" torque induced by the engine thrust, in world space
+                        neutralWorldTorque += Vector3.Cross(trustPosFromCoM, neutralThrustForce);
+
+                        Vector3 actuatedThrustForce;
+
+                        // so...
+                        // this is a "validating" test implementation that only work if the engine rotation is identical to the vessel.ReferenceTransform
+                        // rotation (which is why roll isn't implemented).
+                        // now we need to reproduce the ModuleGimbal real control scheme as implemented in ModuleGimbal.GimbalRotation()
+
+                        actuatedThrustForce = Quaternion.AngleAxis(mg.gimbalRangeXP, mg.vessel.ReferenceTransform.right) * neutralThrustForce;
+                        pitchPosTorque += Vector3.Cross(trustPosFromCoM, actuatedThrustForce);
+
+                        actuatedThrustForce = Quaternion.AngleAxis(mg.gimbalRangeXN, -mg.vessel.ReferenceTransform.right) * neutralThrustForce;
+                        pitchNegTorque += Vector3.Cross(trustPosFromCoM, actuatedThrustForce);
+
+                        actuatedThrustForce = Quaternion.AngleAxis(mg.gimbalRangeYP, mg.vessel.ReferenceTransform.forward) * neutralThrustForce;
+                        yawPosTorque += Vector3.Cross(trustPosFromCoM, actuatedThrustForce);
+
+                        actuatedThrustForce = Quaternion.AngleAxis(mg.gimbalRangeYN, -mg.vessel.ReferenceTransform.forward) * neutralThrustForce;
+                        yawNegTorque += Vector3.Cross(trustPosFromCoM, actuatedThrustForce);
+
+                        ui.UpdatepitchPosThrustArrow(engine.transform, actuatedThrustForce);
+                    }
+
+                    neutralTorque += mg.vessel.ReferenceTransform.InverseTransformDirection(neutralWorldTorque); // PRY torque
+
+                    pitchPosTorque = mg.vessel.ReferenceTransform.InverseTransformDirection(pitchPosTorque);
+                    pitchNegTorque = mg.vessel.ReferenceTransform.InverseTransformDirection(pitchNegTorque);
+                    yawPosTorque = mg.vessel.ReferenceTransform.InverseTransformDirection(yawPosTorque);
+                    yawNegTorque = mg.vessel.ReferenceTransform.InverseTransformDirection(yawNegTorque);
+
+                    posTorque = new Vector3(pitchPosTorque.x, 0f, yawPosTorque.z);
+                    negTorque = new Vector3(pitchNegTorque.x, 0f, yawNegTorque.z);
+                    posTorque -= neutralTorque;
+                    negTorque -= neutralTorque; // neg values must be inverted per the GetPotentialTorque convention
+
+
+                    ui.UpdateNeutralThrustArrow(engine.transform, neutralThrustForce);
+                    ui.Fields["gimbalNeutralTorque"].guiActive = true;
+                    ui.gimbalNeutralTorque = neutralTorque;
+
+                    ui.Fields["spos"].guiActive = true;
+                    ui.spos = posTorque;
+
+                    ui.Fields["sneg"].guiActive = true;
+                    ui.sneg = negTorque;
+                }
+            }
+        }
+
+        #endregion
+
+#if DEBUG
+        static bool ModuleLiftingSurface_DestroyLiftAndDragArrows_Prefix() => false;
 #endif
     }
 
 #if DEBUG
-
     public class TorqueUIModule : PartModule
     {
         [KSPField(guiActive = true, guiFormat = "F1")]
         public Vector3 pos;
         [KSPField(guiActive = true, guiFormat = "F1")]
         public Vector3 neg;
+
+        // control surface debug stuff
         [KSPField(guiActive = false, guiFormat = "F1")]
         public Vector3 spos;
         [KSPField(guiActive = false, guiFormat = "F1")]
@@ -530,7 +714,31 @@ namespace KSPCommunityFixes.BugFixes
         public Vector3 negAction;
         [KSPField(guiActive = false, guiFormat = "F1")]
         public Vector3 actionV;
-    }
 
+        // gimbal debug stuff
+        [KSPField(guiActive = false, guiFormat = "F1")]
+        public Vector3 gimbalNeutralTorque;
+
+        public ArrowPointer neutralThrustArrow;
+        public ArrowPointer pitchPosThrustArrow;
+
+        public void UpdateNeutralThrustArrow(Transform origin, Vector3 thrust)
+        {
+            if (neutralThrustArrow == null)
+                neutralThrustArrow = ArrowPointer.Create(origin, Vector3.zero, Vector3.zero, 0f, Color.blue, true);
+
+            neutralThrustArrow.Direction = thrust;
+            neutralThrustArrow.Length = thrust.magnitude * PhysicsGlobals.AeroForceDisplayScale;
+        }
+
+        public void UpdatepitchPosThrustArrow(Transform origin, Vector3 thrust)
+        {
+            if (pitchPosThrustArrow == null)
+                pitchPosThrustArrow = ArrowPointer.Create(origin, Vector3.zero, Vector3.zero, 0f, Color.red, true);
+
+            pitchPosThrustArrow.Direction = thrust;
+            pitchPosThrustArrow.Length = thrust.magnitude * PhysicsGlobals.AeroForceDisplayScale;
+        }
+    }
 #endif
 }
