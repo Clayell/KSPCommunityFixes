@@ -496,113 +496,90 @@ namespace KSPCommunityFixes.BugFixes
 
         #region ModuleGimbal
 
+        // - I'm not entirely sure we aren't inverting pos/neg
+        // - negative values when engines above CoM... not sure what to do : swap or take absolute ?
+
         static bool ModuleGimbal_GetPotentialTorque_Prefix(ModuleGimbal __instance, out Vector3 pos, out Vector3 neg)
         {
-            ModuleGimbal mg = __instance;
-
             pos = Vector3.zero;
             neg = Vector3.zero;
 
-            if (mg.gimbalLock || !mg.moduleIsEnabled)
+            if (__instance.gimbalLock || !__instance.moduleIsEnabled || (!__instance.enablePitch && !__instance.enableRoll && !__instance.enableYaw))
                 return false;
 
-            if (mg.engineMultsList == null)
-                mg.CreateEngineList();
+            if (__instance.engineMultsList == null)
+                __instance.CreateEngineList();
 
-            Vector3 currentCoM = mg.vessel.CurrentCoM;
-            Vector3 localCoM = mg.vessel.ReferenceTransform.InverseTransformPoint(currentCoM);
-            int transformIndex = mg.gimbalTransforms.Count;
+            Vector3 predictedCoM = __instance.vessel.CurrentCoM;
+            Transform vesselReferenceTransform = __instance.vessel.ReferenceTransform;
+
+            int transformIndex = __instance.gimbalTransforms.Count;
             while (transformIndex-- > 0)
             {
-                Transform transform = mg.gimbalTransforms[transformIndex];
-                Vector3 gimbalToCoM = transform.position - currentCoM;
-                float gimbalToCoMDistance = gimbalToCoM.magnitude;
-                float gimbalToCoMAxisDistance = Vector3.ProjectOnPlane(gimbalToCoM, mg.vessel.ReferenceTransform.up).magnitude;
-                int engineIndex = mg.engineMultsList[transformIndex].Count;
-                while (engineIndex-- > 0)
-                {
-                    KeyValuePair<ModuleEngines, float> engineThrustMultiplier = mg.engineMultsList[transformIndex][engineIndex];
-                    float thrustForce = engineThrustMultiplier.Value * engineThrustMultiplier.Key.finalThrust;
-                    if (thrustForce > 0f)
-                    {
-                        Vector3 actuationAngles;
-                        float actuation;
-
-                        float pitchYawTorqueMagnitude = gimbalToCoMDistance * thrustForce;
-
-                        actuationAngles = mg.GimbalRotation(transform, Vector3.right, localCoM);
-                        actuation = Mathf.Sin(Mathf.Abs(actuationAngles.x) * Mathf.Deg2Rad) + Mathf.Sin(Mathf.Abs(actuationAngles.y) * Mathf.Deg2Rad);
-                        pos.x += actuation * pitchYawTorqueMagnitude;
-
-                        actuationAngles = mg.GimbalRotation(transform, -Vector3.right, localCoM);
-                        actuation = Mathf.Sin(Mathf.Abs(actuationAngles.x) * Mathf.Deg2Rad) + Mathf.Sin(Mathf.Abs(actuationAngles.y) * Mathf.Deg2Rad);
-                        neg.x += actuation * pitchYawTorqueMagnitude;
-
-                        actuationAngles = mg.GimbalRotation(transform, Vector3.forward, localCoM);
-                        actuation = Mathf.Sin(Mathf.Abs(actuationAngles.x) * Mathf.Deg2Rad) + Mathf.Sin(Mathf.Abs(actuationAngles.y) * Mathf.Deg2Rad);
-                        pos.z += actuation * pitchYawTorqueMagnitude;
-
-                        actuationAngles = mg.GimbalRotation(transform, -Vector3.forward, localCoM);
-                        actuation = Mathf.Sin(Mathf.Abs(actuationAngles.x) * Mathf.Deg2Rad) + Mathf.Sin(Mathf.Abs(actuationAngles.y) * Mathf.Deg2Rad);
-                        neg.z += actuation * pitchYawTorqueMagnitude;
-
-                        if (gimbalToCoMAxisDistance > mg.minRollOffset)
-                        {
-                            float rollTorqueMagnitude = gimbalToCoMAxisDistance * thrustForce;
-
-                            actuationAngles = mg.GimbalRotation(transform, Vector3.up, localCoM);
-                            actuation = Mathf.Sin(Mathf.Abs(actuationAngles.x) * Mathf.Deg2Rad) + Mathf.Sin(Mathf.Abs(actuationAngles.y) * Mathf.Deg2Rad);
-                            pos.y += actuation * rollTorqueMagnitude;
-
-                            actuationAngles = mg.GimbalRotation(transform, -Vector3.up, localCoM);
-                            actuation = Mathf.Sin(Mathf.Abs(actuationAngles.x) * Mathf.Deg2Rad) + Mathf.Sin(Mathf.Abs(actuationAngles.y) * Mathf.Deg2Rad);
-                            neg.y += actuation * rollTorqueMagnitude;
-                        }
-                    }
-                }
-            }
-
-            GetGimbalPotentialTorqueFixed(mg);
-
-            TorqueUIModule ui = __instance.part.FindModuleImplementing<TorqueUIModule>();
-            ui.pos = pos;
-            ui.neg = neg;
-
-            return false;
-        }
-
-        // Quaternion AtoB = B * Quaternion.Inverse(A);
-
-        // engine thrust :
-        // Transform transform = thrustTransforms[i];
-        // base.part.AddForceAtPosition(-transform.forward * finalThrust * thrustTransformMultipliers[i], transform.position);
-
-        private static void GetGimbalPotentialTorqueFixed(ModuleGimbal mg)
-        {
-            Vector3 predictedCoM = mg.vessel.CurrentCoM;
-
-            int transformIndex = mg.gimbalTransforms.Count;
-            while (transformIndex-- > 0)
-            {
-                Transform gimbalTransform = mg.gimbalTransforms[transformIndex];
+                Transform gimbalTransform = __instance.gimbalTransforms[transformIndex];
 
                 // this is the neutral gimbalTransform.localRotation
-                Quaternion neutralLocalRot = mg.initRots[transformIndex];
+                Quaternion neutralLocalRot = __instance.initRots[transformIndex];
                 Quaternion neutralWorldRot = gimbalTransform.parent.rotation * neutralLocalRot;
                 // get the rotation between the current gimbal rotation and the neutral rotation
-                Quaternion worldDiff = neutralWorldRot * Quaternion.Inverse(gimbalTransform.rotation);
+                Quaternion gimbalWorldRotToNeutral = neutralWorldRot * Quaternion.Inverse(gimbalTransform.rotation);
 
-                Vector3 posTorque;
-                Vector3 negTorque;
                 Vector3 neutralTorque = Vector3.zero;
+                Vector3 pitchPosTorque = Vector3.zero;
+                Vector3 pitchNegTorque = Vector3.zero;
+                Vector3 rollPosTorque = Vector3.zero;
+                Vector3 rollNegTorque = Vector3.zero;
+                Vector3 yawPosTorque = Vector3.zero;
+                Vector3 yawNegTorque = Vector3.zero;
 
-                //posTorque -= neutralTorque;
-                //negTorque -= neutralTorque;
+                Vector3 controlPoint = vesselReferenceTransform.InverseTransformPoint(gimbalTransform.position);
 
-
-                List<KeyValuePair<ModuleEngines, float>> engines = mg.engineMultsList[transformIndex];
-                foreach (KeyValuePair<ModuleEngines, float> engineThrustMultiplier in engines)
+                Quaternion pitchPosActuation;
+                Quaternion pitchNegActuation;
+                if (__instance.enablePitch)
                 {
+                    pitchPosActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.right, controlPoint, neutralLocalRot, neutralWorldRot);
+                    pitchNegActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.left, controlPoint, neutralLocalRot, neutralWorldRot);
+                }
+                else
+                {
+                    pitchPosActuation = Quaternion.identity;
+                    pitchNegActuation = Quaternion.identity;
+                }
+
+                Quaternion rollPosActuation;
+                Quaternion rollNegActuation;
+                if (__instance.enableRoll)
+                {
+                    rollPosActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.up, controlPoint, neutralLocalRot, neutralWorldRot);
+                    rollNegActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.down, controlPoint, neutralLocalRot, neutralWorldRot);
+                }
+                else
+                {
+                    rollPosActuation = Quaternion.identity;
+                    rollNegActuation = Quaternion.identity;
+                }
+
+                Quaternion yawPosActuation;
+                Quaternion yawNegActuation;
+                if (__instance.enableYaw)
+                {
+                    yawPosActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.forward, controlPoint, neutralLocalRot, neutralWorldRot);
+                    yawNegActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.back, controlPoint, neutralLocalRot, neutralWorldRot);
+                }
+                else
+                {
+                    yawPosActuation = Quaternion.identity;
+                    yawNegActuation = Quaternion.identity;
+                }
+
+                List<KeyValuePair<ModuleEngines, float>> engines = __instance.engineMultsList[transformIndex];
+
+                int engineIndex = engines.Count;
+                while (engineIndex-- > 0)
+                {
+                    KeyValuePair<ModuleEngines, float> engineThrustMultiplier = engines[engineIndex];
+
                     ModuleEngines engine = engineThrustMultiplier.Key;
                     float thrustMultiplier = engineThrustMultiplier.Value;
                     float thrustMagnitude = engine.finalThrust * thrustMultiplier;
@@ -610,82 +587,118 @@ namespace KSPCommunityFixes.BugFixes
                     if (thrustMagnitude <= 0f)
                         continue;
 
-                    Vector3 neutralWorldTorque = Vector3.zero;
-                    Vector3 neutralThrustForce = Vector3.zero;
-
-                    Vector3 pitchPosTorque = Vector3.zero;
-                    Vector3 pitchNegTorque = Vector3.zero;
-                    Vector3 rollPosTorque = Vector3.zero;
-                    Vector3 rollNegTorque = Vector3.zero;
-                    Vector3 yawPosTorque = Vector3.zero;
-                    Vector3 yawNegTorque = Vector3.zero;
-
-                    TorqueUIModule ui = mg.part.FindModuleImplementing<TorqueUIModule>();
-
-                    
-                    foreach (Transform thrustTransform in engine.thrustTransforms)
+                    int thrustTransformIndex = engine.thrustTransforms.Count;
+                    while (thrustTransformIndex-- > 0)
                     {
+                        Transform thrustTransform = engine.thrustTransforms[thrustTransformIndex];
+
                         // To get the "neutral" transform position, we need to walk back the transform hierarchy to correct for the current gimbal
                         // rotation induced thrustTransform position offset. It's not critical to do it (see below as for why), but it would be weird
                         // to have the end results varying slightly depending on the current actuation.
                         // But note that when getting the actuated forces, we don't use the modified thrustTransform position. In most cases, the  
                         // actuation induced position shift of the thrustTransform won't matter much, since the gimbal pivot - thrustTransform distance
                         // is usally tiny compared to the CoM-thrustTransform distance.
-                        Vector3 thrustTransformPosition = gimbalTransform.position + (worldDiff * (thrustTransform.position - gimbalTransform.position));
+                        Vector3 thrustTransformPosition = gimbalTransform.position + (gimbalWorldRotToNeutral * (thrustTransform.position - gimbalTransform.position));
                         Vector3 trustPosFromCoM = thrustTransformPosition - predictedCoM;
 
                         // get the neutral thrust force by removing the thrustTransform current actuation induced rotation 
-                        neutralThrustForce = worldDiff * (thrustTransform.forward * thrustMagnitude);
+                        Vector3 neutralThrustForce = gimbalWorldRotToNeutral * (thrustTransform.forward * thrustMagnitude);
 
                         // get the "natural" torque induced by the engine thrust, in world space
-                        neutralWorldTorque += Vector3.Cross(trustPosFromCoM, neutralThrustForce);
+                        neutralTorque += Vector3.Cross(trustPosFromCoM, neutralThrustForce);
 
-                        Vector3 actuatedThrustForce;
+                        if (__instance.enablePitch)
+                        {
+                            pitchPosTorque += Vector3.Cross(trustPosFromCoM, pitchPosActuation * neutralThrustForce);
+                            pitchNegTorque += Vector3.Cross(trustPosFromCoM, pitchNegActuation * neutralThrustForce);
+                        }
 
-                        // so...
-                        // this is a "validating" test implementation that only work if the engine rotation is identical to the vessel.ReferenceTransform
-                        // rotation (which is why roll isn't implemented).
-                        // now we need to reproduce the ModuleGimbal real control scheme as implemented in ModuleGimbal.GimbalRotation()
+                        if (__instance.enableRoll)
+                        {
+                            rollPosTorque += Vector3.Cross(trustPosFromCoM, rollPosActuation * neutralThrustForce);
+                            rollNegTorque += Vector3.Cross(trustPosFromCoM, rollNegActuation * neutralThrustForce);
+                        }
 
-                        actuatedThrustForce = Quaternion.AngleAxis(mg.gimbalRangeXP, mg.vessel.ReferenceTransform.right) * neutralThrustForce;
-                        pitchPosTorque += Vector3.Cross(trustPosFromCoM, actuatedThrustForce);
-
-                        actuatedThrustForce = Quaternion.AngleAxis(mg.gimbalRangeXN, -mg.vessel.ReferenceTransform.right) * neutralThrustForce;
-                        pitchNegTorque += Vector3.Cross(trustPosFromCoM, actuatedThrustForce);
-
-                        actuatedThrustForce = Quaternion.AngleAxis(mg.gimbalRangeYP, mg.vessel.ReferenceTransform.forward) * neutralThrustForce;
-                        yawPosTorque += Vector3.Cross(trustPosFromCoM, actuatedThrustForce);
-
-                        actuatedThrustForce = Quaternion.AngleAxis(mg.gimbalRangeYN, -mg.vessel.ReferenceTransform.forward) * neutralThrustForce;
-                        yawNegTorque += Vector3.Cross(trustPosFromCoM, actuatedThrustForce);
-
-                        ui.UpdatepitchPosThrustArrow(engine.transform, actuatedThrustForce);
+                        if (__instance.enableYaw)
+                        {
+                            yawPosTorque += Vector3.Cross(trustPosFromCoM, yawPosActuation * neutralThrustForce);
+                            yawNegTorque += Vector3.Cross(trustPosFromCoM, yawNegActuation * neutralThrustForce);
+                        }
                     }
-
-                    neutralTorque += mg.vessel.ReferenceTransform.InverseTransformDirection(neutralWorldTorque); // PRY torque
-
-                    pitchPosTorque = mg.vessel.ReferenceTransform.InverseTransformDirection(pitchPosTorque);
-                    pitchNegTorque = mg.vessel.ReferenceTransform.InverseTransformDirection(pitchNegTorque);
-                    yawPosTorque = mg.vessel.ReferenceTransform.InverseTransformDirection(yawPosTorque);
-                    yawNegTorque = mg.vessel.ReferenceTransform.InverseTransformDirection(yawNegTorque);
-
-                    posTorque = new Vector3(pitchPosTorque.x, 0f, yawPosTorque.z);
-                    negTorque = new Vector3(pitchNegTorque.x, 0f, yawNegTorque.z);
-                    posTorque -= neutralTorque;
-                    negTorque -= neutralTorque; // neg values must be inverted per the GetPotentialTorque convention
-
-
-                    ui.UpdateNeutralThrustArrow(engine.transform, neutralThrustForce);
-                    ui.Fields["gimbalNeutralTorque"].guiActive = true;
-                    ui.gimbalNeutralTorque = neutralTorque;
-
-                    ui.Fields["spos"].guiActive = true;
-                    ui.spos = posTorque;
-
-                    ui.Fields["sneg"].guiActive = true;
-                    ui.sneg = negTorque;
                 }
+
+                neutralTorque = vesselReferenceTransform.InverseTransformDirection(neutralTorque);
+                pitchPosTorque = vesselReferenceTransform.InverseTransformDirection(pitchPosTorque);
+                pitchNegTorque = vesselReferenceTransform.InverseTransformDirection(pitchNegTorque);
+                rollPosTorque = vesselReferenceTransform.InverseTransformDirection(rollPosTorque);
+                rollNegTorque = vesselReferenceTransform.InverseTransformDirection(rollNegTorque);
+                yawPosTorque = vesselReferenceTransform.InverseTransformDirection(yawPosTorque);
+                yawNegTorque = vesselReferenceTransform.InverseTransformDirection(yawNegTorque);
+
+                Vector3 gimbalPosTorque = new Vector3(pitchPosTorque.x, rollPosTorque.y, yawPosTorque.z);
+                Vector3 gimbalNegTorque = new Vector3(pitchNegTorque.x, rollNegTorque.y, yawNegTorque.z);
+
+                pos += gimbalPosTorque - neutralTorque;
+                neg += (gimbalNegTorque - neutralTorque) * -1f; // neg values must be positive per the GetPotentialTorque convention
             }
+
+#if DEBUG
+            //ModuleGimbal_GetPotentialTorque_Prefix_Orig(__instance, out Vector3 posO, out Vector3 negO);
+
+            TorqueUIModule ui = __instance.part.FindModuleImplementing<TorqueUIModule>();
+            if (ui != null)
+            {
+                ui.pos = pos;
+                ui.neg = neg;
+
+                //ui.Fields["spos"].guiActive = true;
+                //ui.spos = posO;
+                //ui.Fields["sneg"].guiActive = true;
+                //ui.sneg = negO;
+            }
+#endif
+
+            return false;
+        }
+
+        static Quaternion GetGimbalWorldRotation(ModuleGimbal mg, Transform gimbalTransform, Vector3 ctrlState, Vector3 controlPoint, Quaternion neutralLocalRot, Quaternion neutralWorldRot)
+        {
+            if (mg.vessel.CoM.y < controlPoint.y)
+            {
+                ctrlState.x *= -1f;
+                ctrlState.z *= -1f;
+            }
+
+            if (ctrlState.y != 0f && mg.enableRoll)
+            {
+                if (controlPoint.x > mg.minRollOffset)
+                    ctrlState.x += ctrlState.y;
+                else if (controlPoint.x < -mg.minRollOffset)
+                    ctrlState.x -= ctrlState.y;
+
+                if (controlPoint.z > mg.minRollOffset)
+                    ctrlState.z += ctrlState.y;
+                else if (controlPoint.z < -mg.minRollOffset)
+                    ctrlState.z -= ctrlState.y;
+            }
+
+            // Stock does gimbalTransform.InverseTransformDirection(), resulting in the available torque varying with the current gimbal actuation...
+            // To work around that, we call InverseTransformDirection() on the parent, then apply the neutral rotation.
+            Vector3 localActuation = 
+                Quaternion.Inverse(neutralLocalRot) 
+                * gimbalTransform.parent.InverseTransformDirection(mg.vessel.ReferenceTransform.TransformDirection(ctrlState));
+
+            localActuation.x = Mathf.Clamp(localActuation.x, -1f, 1f) * ((localActuation.x > 0f) ? mg.gimbalRangeXP : mg.gimbalRangeXN) * mg.gimbalLimiter * 0.01f;
+            localActuation.y = Mathf.Clamp(localActuation.y, -1f, 1f) * ((localActuation.y > 0f) ? mg.gimbalRangeYP : mg.gimbalRangeYN) * mg.gimbalLimiter * 0.01f;
+            
+            Quaternion gimbalRotation =
+                neutralLocalRot
+                * Quaternion.AngleAxis(localActuation.x, mg.xMult * Vector3.right) 
+                * Quaternion.AngleAxis(localActuation.y, mg.yMult * (mg.flipYZ ? Vector3.forward : Vector3.up));
+
+            gimbalRotation = (gimbalTransform.parent.rotation * gimbalRotation) * Quaternion.Inverse(neutralWorldRot);
+
+            return gimbalRotation;
         }
 
         #endregion
