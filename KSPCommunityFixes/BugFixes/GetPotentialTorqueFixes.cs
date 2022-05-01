@@ -1,52 +1,83 @@
-﻿using System;
-using HarmonyLib;
+﻿using HarmonyLib;
 using System.Collections.Generic;
+using Unity.Profiling;
 using UnityEngine;
 
 /*
- This patch is a general rewrite of the stock implementations for `ITorqueProvider.GetPotentialTorque(out Vector3 pos, out Vector3 neg)`.
- It follow these conventions :
- - x is pitch, y is roll, z is yaw
- - `pos` is the actuation induced torque for a positive FlightCtrlState (pitch = 1, roll, = 1 yaw = 1) control request
- - `neg` is the actuation induced torque for a negative FlightCtrlState (pitch = -1, roll, = -1 yaw = -1) control request
- - Contrary to the stock implementations, values are strictly the **actuation induced** torque.
- - Positive values mean actuation will induce a torque in the desired direction. Negatives values mean that actuation will
-   induce a torque in the opposite direction. For example, a negative `pos.x` value mean that for a positive roll actuation
-   (ctrlState.roll = 1), the torque provider will produce a torque inducing a negative roll, essentially reducing the total
-   available torque in that direction. This can notably happen with the stock aero control surfaces, due to their control
-   scheme being only based on their relative position/orientation to the vessel CoM and ignoring other factors like AoA.
-   This mean a correct implementation of a `GetVesselPotentialTorque()` method is :
-     ```cs
-     foreach (ITorqueProvider torqueProvider)
-     {
-       torqueProvider.GetPotentialTorque(out Vector3 pos, out Vector3 neg);
-       vesselPosTorque += pos;
-       vesselNegTorque += neg;
-     }
-     if (vesselPosTorque.x < 0f) vesselPosTorque.x = 0f;
-     if (vesselPosTorque.y < 0f) vesselPosTorque.y = 0f;
-     if (vesselPosTorque.z < 0f) vesselPosTorque.z = 0f;
-     if (vesselNegTorque.x < 0f) vesselNegTorque.x = 0f;
-     if (vesselNegTorque.y < 0f) vesselNegTorque.y = 0f;
-     if (vesselNegTorque.z < 0f) vesselNegTorque.z = 0f;
-     ```
+This patch is a rewrite of the stock implementations for `ITorqueProvider.GetPotentialTorque(out Vector3 pos, out Vector3 neg)`.
+All 4 of the stock implementations have various issues and are generally giving unreliable (not to say plain wrong) results.
+Those issues are commented in each patch, but to summarize :
+- ModuleRectionWheels is mostly ok, its only issue is to ignore the state of "authority limiter" tweakable
+- ModuleRCS is giving entirely random results, and the stcok implementation just doesn't make any sense
+- ModuleGimbal results are somewhat coherent, but their magnitude for pitch/yaw is wrong. They are underestimated for CoM-aligned 
+  engines and vastly overestimated for engines placed off-CoM-center.
+- ModuleControlSurface results are generally unreliable. Beside the fact that they can be randomly negative, the magnitude is
+  usually wrong and inconsistent. Depending on part placement relative to the CoM, they can return zero available torque or being 
+  vastly overestimated. They also don't account for drag induced torque, and are almost entirely borked when a control surface is 
+  in the deployed state.
 
- Quick review of how the stock implementations are handled in the modding ecosystem :
- - *It seems* Mechjeb doesn't care about a value being from "pos" or "neg", it assume a negative value from either of the vector3 is a negative
-   torque component (ie, if "pos.x" or "neg.x" is negative, it add that as negative avaiable torque around x).
-   Ref : https://github.com/MuMech/MechJeb2/blob/f5c1193813da7d2e2e347f963dd4ee4b7fb11a90/MechJeb2/VesselState.cs#L1073-L1076
-   Ref2 : https://github.com/MuMech/MechJeb2/blob/f5c1193813da7d2e2e347f963dd4ee4b7fb11a90/MechJeb2/Vector6.cs#L82-L93
- - kOS assume that the absolute value should be used.
-   (side note : kOS reimplements ModuleReactionWheel.GetPotentialTorque() to get around the authority limiter bug)
-   Ref : https://github.com/KSP-KOS/KOS/blob/7b7874153bc6c428404b3a1a913487b2fd0a9d99/src/kOS/Control/SteeringManager.cs#L658-L664
- - TCA doesn't seem aware of the possibility of negative values, it assume they are positive.
-   (side note : TCA apply the authority limiter to the stock ModuleReactionWheel.GetPotentialTorque() results)
-   Ref : https://github.com/allista/ThrottleControlledAvionics/blob/b79a7372ab69616801f9953256b43ee872b90cf2/VesselProps/TorqueProps.cs#L167-L169
- - Atmospheric Autopilot replace the stock module implementation by its own and doesn't use the interface at all (!!!)
-   Ref : https://github.com/Boris-Barboris/AtmosphereAutopilot/blob/master/AtmosphereAutopilot/SyncModuleControlSurface.cs
- - FAR implements a replacement for ModuleControlSurface and consequently has a custom GetPotentialTorque() implementation.
-   It seems that it will *always* return positive "pos" values and negative "neg" values, and I've
-   Ref : https://github.com/dkavolis/Ferram-Aerospace-Research/blob/95e127ae140b4be9699da8783d24dd8db726d753/FerramAerospaceResearch/LEGACYferram4/FARControllableSurface.cs#L294-L300
+Note that the KSPCF GetPotentialTorque() implementations for ModuleControlSurface and especially for ModuleGimbal are more 
+computationally intensive that the stock ones. Profiling a stock Dynawing with RCS enabled during ascent show a ~30% degradation 
+when summing the vessel total available torque (~250 calls median : 0.31ms vs 0.24ms, frame time : 1.81% vs 1.46% ). Overall
+this feels acceptable, but this is still is a non-negligible impact that will likely be noticeable in some cases (ie, 
+atmospheric flight with a large vessel having many gimballing engines and control surfaces).
+The implementations are pretty naive and could probably be vastly optimized by someone with a better understanding than me of 
+the underlying maths and physics.
+
+The KSPCF implementations follow these conventions :
+- in pos/neg : x is pitch, y is roll, z is yaw
+- `pos` is the actuation induced torque for a positive FlightCtrlState (pitch = 1, roll, = 1 yaw = 1) control request
+- `neg` is the actuation induced torque for a negative FlightCtrlState (pitch = -1, roll, = -1 yaw = -1) control request
+- Contrary to the stock implementations, values are strictly the **actuation induced** torque (ie, the torque difference
+  between the neutral state and the actuated state). Especially in the case of ModuleGimbal, the stock implementation
+  returns the actuation torque plus the eventual "structural" torque due to an eventual CoM/CoT misalignement.
+- Positive values mean actuation will induce a torque in the desired direction. Negatives values mean that actuation will
+  induce a torque in the opposite direction. For example, a negative `pos.x` value mean that for a positive roll actuation
+  (ctrlState.roll = 1), the torque provider will produce a torque inducing a negative roll, essentially reducing the total
+  available torque in that direction. This can notably happen with the stock aero control surfaces, due to their control 
+  scheme being only based on their relative position/orientation to the vessel CoM and ignoring other factors like AoA.
+- Like the stock implementations, they will give reliable results only if called from FixedUpdate(), including the control 
+  state callbacks like `Vessel.OnFlyByWire` or `Vessel.On*AutopilotUpdate`. Calling them from the Update() loop will result 
+  in an out-of-sync CoM position being used, producing garbage results.
+
+So in the context of the KSPCF patch, a correct implementation of a `GetVesselPotentialTorque()` method is :
+ ```cs
+ foreach (ITorqueProvider torqueProvider)
+ {
+   torqueProvider.GetPotentialTorque(out Vector3 pos, out Vector3 neg);
+   vesselPosTorque += pos;
+   vesselNegTorque += neg;
+ }
+ if (vesselPosTorque.x < 0f) vesselPosTorque.x = 0f;
+ if (vesselPosTorque.y < 0f) vesselPosTorque.y = 0f;
+ if (vesselPosTorque.z < 0f) vesselPosTorque.z = 0f;
+ if (vesselNegTorque.x < 0f) vesselNegTorque.x = 0f;
+ if (vesselNegTorque.y < 0f) vesselNegTorque.y = 0f;
+ if (vesselNegTorque.z < 0f) vesselNegTorque.z = 0f;
+ ```
+
+Quick review of how the stock implementations are handled in the modding ecosystem :
+- *It seems* Mechjeb doesn't care about a value being from "pos" or "neg", it assume a negative value from either of the vector3 
+  is a negative torque component (ie, if "pos.x" or "neg.x" is negative, it add that as negative available torque around x).
+  Ref : https://github.com/MuMech/MechJeb2/blob/f5c1193813da7d2e2e347f963dd4ee4b7fb11a90/MechJeb2/VesselState.cs#L1073-L1076
+  Ref2 : https://github.com/MuMech/MechJeb2/blob/f5c1193813da7d2e2e347f963dd4ee4b7fb11a90/MechJeb2/Vector6.cs#L82-L93
+  As it is, since MechJeb doesn't care for pos/neg and only consider the max, the patches will result in wrong values, but arguably 
+  since it reimplement RCS they will only be "different kind of wrong" for control surfaces and gimbals, and probably "less wrong"
+  overall.
+- kOS assume that the absolute value should be used.
+  (side note : kOS reimplements ModuleReactionWheel.GetPotentialTorque() to get around the authority limiter bug)
+  Ref : https://github.com/KSP-KOS/KOS/blob/7b7874153bc6c428404b3a1a913487b2fd0a9d99/src/kOS/Control/SteeringManager.cs#L658-L664
+  The patches should apply mostly alright for kOS, at the exception of occasional negative values for gimbals and control surfaces
+  being treated as positive, resulting in a higher available torque than what it should.
+- TCA doesn't seem aware of the possibility of negative values, it assume they are positive.
+  Ref : https://github.com/allista/ThrottleControlledAvionics/blob/b79a7372ab69616801f9953256b43ee872b90cf2/VesselProps/TorqueProps.cs#L167-L169
+  The patches should more or less work for TCA, at the exception of negative gimbal/control surfaces values being treated incorrectly
+  and the reaction wheels authority limiter being applied twice.
+- Atmospheric Autopilot replace the stock module implementation by its own and doesn't use the interface at all
+  Ref : https://github.com/Boris-Barboris/AtmosphereAutopilot/blob/master/AtmosphereAutopilot/SyncModuleControlSurface.cs
+- FAR implements a replacement for ModuleControlSurface and consequently has a custom GetPotentialTorque() implementation.
+  It seems that it will *always* return positive "pos" values and negative "neg" values :
+  Ref : https://github.com/dkavolis/Ferram-Aerospace-Research/blob/95e127ae140b4be9699da8783d24dd8db726d753/FerramAerospaceResearch/LEGACYferram4/FARControllableSurface.cs#L294-L300
 */
 
 namespace KSPCommunityFixes.BugFixes
@@ -74,32 +105,31 @@ namespace KSPCommunityFixes.BugFixes
                 PatchMethodType.Prefix,
                 AccessTools.Method(typeof(ModuleGimbal), nameof(ModuleGimbal.GetPotentialTorque)),
                 this));
-
-#if DEBUG
-
-
-            patches.Add(new PatchInfo(
-                PatchMethodType.Prefix,
-                AccessTools.Method(typeof(ModuleLiftingSurface), nameof(ModuleLiftingSurface.DestroyLiftAndDragArrows)),
-                this));
-#endif
         }
+
+        static ProfilerMarker rwProfiler = new ProfilerMarker("ModuleReactionWheel.GetPotentialTorque");
+        static ProfilerMarker rcsProfiler = new ProfilerMarker("ModuleRCS.GetPotentialTorque");
+        static ProfilerMarker ctrlSrfProfiler = new ProfilerMarker("ModuleControlSurface.GetPotentialTorque");
+        static ProfilerMarker gimbalProfiler = new ProfilerMarker("ModuleGimbal.GetPotentialTorque");
 
         #region ModuleReactionWheel
 
         // Fix reaction wheels reporting incorrect available torque when the "Wheel Authority" tweakable is set below 100%.
         static bool ModuleReactionWheel_GetPotentialTorque_Prefix(ModuleReactionWheel __instance, out Vector3 pos, out Vector3 neg)
         {
+            rwProfiler.Begin();
             if (__instance.moduleIsEnabled && __instance.wheelState == ModuleReactionWheel.WheelState.Active && __instance.actuatorModeCycle != 2)
             {
                 float authorityLimiter = __instance.authorityLimiter * 0.01f;
                 neg.x = pos.x = __instance.PitchTorque * authorityLimiter;
                 neg.y = pos.y = __instance.RollTorque * authorityLimiter;
                 neg.z = pos.z = __instance.YawTorque * authorityLimiter;
+                rwProfiler.End();
                 return false;
             }
 
             pos = neg = Vector3.zero;
+            rwProfiler.End();
             return false;
         }
 
@@ -110,6 +140,7 @@ namespace KSPCommunityFixes.BugFixes
         // The stock implementation is 100% broken, this is a complete replacement
         static bool ModuleRCS_GetPotentialTorque_Prefix(ModuleRCS __instance, out Vector3 pos, out Vector3 neg)
         {
+            rcsProfiler.Begin();
             pos = Vector3.zero;
             neg = Vector3.zero;
 
@@ -121,13 +152,17 @@ namespace KSPCommunityFixes.BugFixes
                 || __instance.flameout
                 || (__instance.part.ShieldedFromAirstream && !__instance.shieldedCanThrust))
             {
+                rcsProfiler.End();
                 return false;
             }
 
             Vector3 enabledRotations = new Vector3(__instance.enablePitch ? 1f : 0f, __instance.enableRoll ? 1f : 0f, __instance.enableYaw ? 1f : 0f);
 
             if (enabledRotations == Vector3.zero)
+            {
+                rcsProfiler.End();
                 return false;
+            }
 
             float power = __instance.thrusterPower * __instance.thrustPercentage * 0.01f;
             Vector3 predictedCoM = __instance.vessel.CurrentCoM;
@@ -187,6 +222,7 @@ namespace KSPCommunityFixes.BugFixes
                 ui.neg = neg;
             }
 #endif
+            rcsProfiler.End();
             return false;
         }
 
@@ -218,11 +254,15 @@ namespace KSPCommunityFixes.BugFixes
 
         static bool ModuleControlSurface_GetPotentialTorque_Prefix(ModuleControlSurface __instance, out Vector3 pos, out Vector3 neg)
         {
+            ctrlSrfProfiler.Begin();
             pos = Vector3.zero;
             neg = Vector3.zero;
 
             if (__instance.Qlift == 0.0 || (__instance.ignorePitch && __instance.ignoreYaw && __instance.ignoreRoll))
+            {
+                ctrlSrfProfiler.End();
                 return false;
+            }
 
             if (__instance.displaceVelocity)
             {
@@ -326,7 +366,7 @@ namespace KSPCommunityFixes.BugFixes
 
                     // I hope I got this right. TBH, this was mostly a trial and error job.
                     // - the control surface actuation direction depends on sign of the action
-                    // - then we clamp and inverse the raw torque by the action magnitude
+                    // - then we clamp and inverse the raw torque by the action
                     //   note that this direct scaling is a rough approximation, as the torque output vs actuation function isn't linear,
                     //   but the whole thing is computationally intensive (and complex) enough already...
                     if (pitchActionPos > 0f)
@@ -437,29 +477,10 @@ namespace KSPCommunityFixes.BugFixes
                     ui.Fields["negAction"].guiActive = true;
                     ui.negAction = negAction;
                 }
-
-
-                if (__instance.liftArrow == null)
-                    __instance.liftArrow = ArrowPointer.Create(__instance.baseTransform, __instance.part.CoLOffset, Vector3.zero, 0f, Color.blue, true);
-
-                __instance.liftArrow.Direction = neutralForce;
-                __instance.liftArrow.Length = neutralForce.magnitude * PhysicsGlobals.AeroForceDisplayScale;
-
-
-                if (__instance.axisArrow == null)
-                    __instance.axisArrow = ArrowPointer.Create(__instance.baseTransform, __instance.part.CoLOffset, Vector3.zero, 0f, Color.green, true);
-
-                __instance.axisArrow.Direction = potentialForcePos;
-                __instance.axisArrow.Length = potentialForcePos.magnitude * PhysicsGlobals.AeroForceDisplayScale;
-
-                if (__instance.velocityArrow == null)
-                    __instance.velocityArrow = ArrowPointer.Create(__instance.baseTransform, __instance.part.CoLOffset, Vector3.zero, 0f, Color.red, true);
-
-                __instance.velocityArrow.Direction = potentialForceNeg;
-                __instance.velocityArrow.Length = potentialForceNeg.magnitude * PhysicsGlobals.AeroForceDisplayScale;
 #endif
             }
 
+            ctrlSrfProfiler.End();
             return false;
         }
 
@@ -496,26 +517,40 @@ namespace KSPCommunityFixes.BugFixes
 
         #region ModuleGimbal
 
-        // - I'm not entirely sure we aren't inverting pos/neg
-        // - negative values when engines above CoM... not sure what to do : swap or take absolute ?
-
         static bool ModuleGimbal_GetPotentialTorque_Prefix(ModuleGimbal __instance, out Vector3 pos, out Vector3 neg)
         {
+            gimbalProfiler.Begin();
+
             pos = Vector3.zero;
             neg = Vector3.zero;
 
-            if (__instance.gimbalLock || !__instance.moduleIsEnabled || (!__instance.enablePitch && !__instance.enableRoll && !__instance.enableYaw))
+            if (__instance.gimbalLock || !__instance.gimbalActive || !__instance.moduleIsEnabled || (!__instance.enablePitch && !__instance.enableRoll && !__instance.enableYaw))
+            {
+                gimbalProfiler.End();
                 return false;
+            }
 
             if (__instance.engineMultsList == null)
                 __instance.CreateEngineList();
 
-            Vector3 predictedCoM = __instance.vessel.CurrentCoM;
+            Vector3 worldCoM = __instance.vessel.CurrentCoM;
             Transform vesselReferenceTransform = __instance.vessel.ReferenceTransform;
 
             int transformIndex = __instance.gimbalTransforms.Count;
             while (transformIndex-- > 0)
             {
+                List<KeyValuePair<ModuleEngines, float>> engines = __instance.engineMultsList[transformIndex];
+                int engineIndex = engines.Count;
+
+                // bail out as early as possible to avoid useless processing when engines are inactive
+                bool providesThrust = false;
+                while (engineIndex-- > 0)
+                    if (engines[engineIndex].Key.finalThrust > 0f)
+                        providesThrust = true;
+
+                if (!providesThrust)
+                    continue;
+
                 Transform gimbalTransform = __instance.gimbalTransforms[transformIndex];
 
                 // this is the neutral gimbalTransform.localRotation
@@ -533,13 +568,15 @@ namespace KSPCommunityFixes.BugFixes
                 Vector3 yawNegTorque = Vector3.zero;
 
                 Vector3 controlPoint = vesselReferenceTransform.InverseTransformPoint(gimbalTransform.position);
+                Vector3 localCoM = vesselReferenceTransform.InverseTransformPoint(worldCoM);
+                bool inversedControl = localCoM.y < controlPoint.y;
 
                 Quaternion pitchPosActuation;
                 Quaternion pitchNegActuation;
                 if (__instance.enablePitch)
                 {
-                    pitchPosActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.right, controlPoint, neutralLocalRot, neutralWorldRot);
-                    pitchNegActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.left, controlPoint, neutralLocalRot, neutralWorldRot);
+                    pitchPosActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.right, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
+                    pitchNegActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.left, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
                 }
                 else
                 {
@@ -551,8 +588,8 @@ namespace KSPCommunityFixes.BugFixes
                 Quaternion rollNegActuation;
                 if (__instance.enableRoll)
                 {
-                    rollPosActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.up, controlPoint, neutralLocalRot, neutralWorldRot);
-                    rollNegActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.down, controlPoint, neutralLocalRot, neutralWorldRot);
+                    rollPosActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.up, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
+                    rollNegActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.down, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
                 }
                 else
                 {
@@ -564,8 +601,8 @@ namespace KSPCommunityFixes.BugFixes
                 Quaternion yawNegActuation;
                 if (__instance.enableYaw)
                 {
-                    yawPosActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.forward, controlPoint, neutralLocalRot, neutralWorldRot);
-                    yawNegActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.back, controlPoint, neutralLocalRot, neutralWorldRot);
+                    yawPosActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.forward, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
+                    yawNegActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.back, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
                 }
                 else
                 {
@@ -573,9 +610,7 @@ namespace KSPCommunityFixes.BugFixes
                     yawNegActuation = Quaternion.identity;
                 }
 
-                List<KeyValuePair<ModuleEngines, float>> engines = __instance.engineMultsList[transformIndex];
-
-                int engineIndex = engines.Count;
+                engineIndex = engines.Count;
                 while (engineIndex-- > 0)
                 {
                     KeyValuePair<ModuleEngines, float> engineThrustMultiplier = engines[engineIndex];
@@ -599,7 +634,7 @@ namespace KSPCommunityFixes.BugFixes
                         // actuation induced position shift of the thrustTransform won't matter much, since the gimbal pivot - thrustTransform distance
                         // is usally tiny compared to the CoM-thrustTransform distance.
                         Vector3 thrustTransformPosition = gimbalTransform.position + (gimbalWorldRotToNeutral * (thrustTransform.position - gimbalTransform.position));
-                        Vector3 trustPosFromCoM = thrustTransformPosition - predictedCoM;
+                        Vector3 trustPosFromCoM = thrustTransformPosition - worldCoM;
 
                         // get the neutral thrust force by removing the thrustTransform current actuation induced rotation 
                         Vector3 neutralThrustForce = gimbalWorldRotToNeutral * (thrustTransform.forward * thrustMagnitude);
@@ -628,42 +663,47 @@ namespace KSPCommunityFixes.BugFixes
                 }
 
                 neutralTorque = vesselReferenceTransform.InverseTransformDirection(neutralTorque);
-                pitchPosTorque = vesselReferenceTransform.InverseTransformDirection(pitchPosTorque);
-                pitchNegTorque = vesselReferenceTransform.InverseTransformDirection(pitchNegTorque);
-                rollPosTorque = vesselReferenceTransform.InverseTransformDirection(rollPosTorque);
-                rollNegTorque = vesselReferenceTransform.InverseTransformDirection(rollNegTorque);
-                yawPosTorque = vesselReferenceTransform.InverseTransformDirection(yawPosTorque);
-                yawNegTorque = vesselReferenceTransform.InverseTransformDirection(yawNegTorque);
 
-                Vector3 gimbalPosTorque = new Vector3(pitchPosTorque.x, rollPosTorque.y, yawPosTorque.z);
-                Vector3 gimbalNegTorque = new Vector3(pitchNegTorque.x, rollNegTorque.y, yawNegTorque.z);
+                if (__instance.enablePitch)
+                {
+                    pitchPosTorque = vesselReferenceTransform.InverseTransformDirection(pitchPosTorque);
+                    pitchNegTorque = vesselReferenceTransform.InverseTransformDirection(pitchNegTorque);
+                    pos.x += pitchPosTorque.x - neutralTorque.x;
+                    neg.x -= pitchNegTorque.x - neutralTorque.x;
+                }
 
-                pos += gimbalPosTorque - neutralTorque;
-                neg += (gimbalNegTorque - neutralTorque) * -1f; // neg values must be positive per the GetPotentialTorque convention
+                if (__instance.enableRoll)
+                {
+                    rollPosTorque = vesselReferenceTransform.InverseTransformDirection(rollPosTorque);
+                    rollNegTorque = vesselReferenceTransform.InverseTransformDirection(rollNegTorque);
+                    pos.y += rollPosTorque.y - neutralTorque.y;
+                    neg.y -= rollNegTorque.y - neutralTorque.y;
+                }
+
+                if (__instance.enableYaw)
+                {
+                    yawPosTorque = vesselReferenceTransform.InverseTransformDirection(yawPosTorque);
+                    yawNegTorque = vesselReferenceTransform.InverseTransformDirection(yawNegTorque);
+                    pos.z += yawPosTorque.z - neutralTorque.z;
+                    neg.z -= yawNegTorque.z - neutralTorque.z;
+                }
             }
 
 #if DEBUG
-            //ModuleGimbal_GetPotentialTorque_Prefix_Orig(__instance, out Vector3 posO, out Vector3 negO);
-
             TorqueUIModule ui = __instance.part.FindModuleImplementing<TorqueUIModule>();
             if (ui != null)
             {
                 ui.pos = pos;
                 ui.neg = neg;
-
-                //ui.Fields["spos"].guiActive = true;
-                //ui.spos = posO;
-                //ui.Fields["sneg"].guiActive = true;
-                //ui.sneg = negO;
             }
 #endif
-
+            gimbalProfiler.End();
             return false;
         }
 
-        static Quaternion GetGimbalWorldRotation(ModuleGimbal mg, Transform gimbalTransform, Vector3 ctrlState, Vector3 controlPoint, Quaternion neutralLocalRot, Quaternion neutralWorldRot)
+        static Quaternion GetGimbalWorldRotation(ModuleGimbal mg, Transform gimbalTransform, Vector3 ctrlState, Vector3 controlPoint, bool inversedControl, Quaternion neutralLocalRot, Quaternion neutralWorldRot)
         {
-            if (mg.vessel.CoM.y < controlPoint.y)
+            if (inversedControl)
             {
                 ctrlState.x *= -1f;
                 ctrlState.z *= -1f;
@@ -688,24 +728,23 @@ namespace KSPCommunityFixes.BugFixes
                 Quaternion.Inverse(neutralLocalRot) 
                 * gimbalTransform.parent.InverseTransformDirection(mg.vessel.ReferenceTransform.TransformDirection(ctrlState));
 
+            // get actuation angles
             localActuation.x = Mathf.Clamp(localActuation.x, -1f, 1f) * ((localActuation.x > 0f) ? mg.gimbalRangeXP : mg.gimbalRangeXN) * mg.gimbalLimiter * 0.01f;
             localActuation.y = Mathf.Clamp(localActuation.y, -1f, 1f) * ((localActuation.y > 0f) ? mg.gimbalRangeYP : mg.gimbalRangeYN) * mg.gimbalLimiter * 0.01f;
             
+            // get local rotation
             Quaternion gimbalRotation =
                 neutralLocalRot
                 * Quaternion.AngleAxis(localActuation.x, mg.xMult * Vector3.right) 
                 * Quaternion.AngleAxis(localActuation.y, mg.yMult * (mg.flipYZ ? Vector3.forward : Vector3.up));
 
+            // transform in world space
             gimbalRotation = (gimbalTransform.parent.rotation * gimbalRotation) * Quaternion.Inverse(neutralWorldRot);
 
             return gimbalRotation;
         }
 
         #endregion
-
-#if DEBUG
-        static bool ModuleLiftingSurface_DestroyLiftAndDragArrows_Prefix() => false;
-#endif
     }
 
 #if DEBUG
@@ -731,27 +770,6 @@ namespace KSPCommunityFixes.BugFixes
         // gimbal debug stuff
         [KSPField(guiActive = false, guiFormat = "F1")]
         public Vector3 gimbalNeutralTorque;
-
-        public ArrowPointer neutralThrustArrow;
-        public ArrowPointer pitchPosThrustArrow;
-
-        public void UpdateNeutralThrustArrow(Transform origin, Vector3 thrust)
-        {
-            if (neutralThrustArrow == null)
-                neutralThrustArrow = ArrowPointer.Create(origin, Vector3.zero, Vector3.zero, 0f, Color.blue, true);
-
-            neutralThrustArrow.Direction = thrust;
-            neutralThrustArrow.Length = thrust.magnitude * PhysicsGlobals.AeroForceDisplayScale;
-        }
-
-        public void UpdatepitchPosThrustArrow(Transform origin, Vector3 thrust)
-        {
-            if (pitchPosThrustArrow == null)
-                pitchPosThrustArrow = ArrowPointer.Create(origin, Vector3.zero, Vector3.zero, 0f, Color.red, true);
-
-            pitchPosThrustArrow.Direction = thrust;
-            pitchPosThrustArrow.Length = thrust.magnitude * PhysicsGlobals.AeroForceDisplayScale;
-        }
     }
 #endif
 }

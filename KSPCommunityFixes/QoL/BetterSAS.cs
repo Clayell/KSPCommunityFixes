@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using Unity.Profiling;
 using UnityEngine;
 
 namespace KSPCommunityFixes.QoL
@@ -204,25 +205,26 @@ namespace KSPCommunityFixes.QoL
             }
         }
 
-
         private new void UpdateVesselTorque(FlightCtrlState s)
         {
             torqueVector = GetTotalVesselTorque(vessel);
         }
 
+        static ProfilerMarker vesselTorqueProfiler = new ProfilerMarker("KSPCFVesselSAS.GetTotalVesselTorque");
+
         private new Vector3 GetTotalVesselTorque(Vessel v)
         {
+            vesselTorqueProfiler.Begin();
             posTorque = Vector3.zero;
             negTorque = Vector3.zero;
-            int count = vessel.parts.Count;
-            while (count-- > 0)
+            int partIdx = vessel.parts.Count;
+            while (partIdx-- > 0)
             {
-                Part part = vessel.parts[count];
-                int count2 = part.Modules.Count;
-                while (count2-- > 0)
+                Part part = vessel.parts[partIdx];
+                int moduleIdx = part.Modules.Count;
+                while (moduleIdx-- > 0)
                 {
-                    ITorqueProvider torqueProvider = part.Modules[count2] as ITorqueProvider;
-                    if (torqueProvider != null)
+                    if (part.Modules[moduleIdx] is ITorqueProvider torqueProvider && torqueProvider != null)
                     {
                         torqueProvider.GetPotentialTorque(out Vector3 pos, out Vector3 neg);
                         posTorque += pos;
@@ -243,6 +245,7 @@ namespace KSPCommunityFixes.QoL
                 0.5f * (posTorque.y + negTorque.y),
                 0.5f * (posTorque.z + negTorque.z));
 
+            vesselTorqueProfiler.End();
             return averageTorque;
         }
 
@@ -483,7 +486,7 @@ namespace KSPCommunityFixes.QoL
         private readonly double PosSmoothIn = 1;
         private readonly double PosFactor = 1.0;
         private readonly double maxStoppingTime = 2.0;
-        private readonly double minFlipTime = 120;
+        private readonly double minFlipTime = 60;
         private readonly double rollControlRange = 5;
         private bool useControlRange = true;
         private bool useFlipTime = true;
@@ -499,8 +502,7 @@ namespace KSPCommunityFixes.QoL
         /* max angular rotation */
         private Vector3d _maxOmega = Vector3d.zero;
         private Vector3d _omega0 = _vector3dnan;
-        private Vector3d _targetOmega = Vector3d.zero; // MJ user setting
-        private Vector3d _targetTorque = Vector3d.zero;
+        private Vector3d _targetOmega = Vector3d.zero;
         private Vector3d _actuation = Vector3d.zero;
 
         /* error */
@@ -640,14 +642,15 @@ namespace KSPCommunityFixes.QoL
 
         private void UpdatePredictionPI()
         {
+            GetTotalVesselTorque(vessel);
+            //GetVesselPotentialTorqueClampedByResponseSpeed();
+
             _omega0 = vessel.angularVelocityD;
 
             UpdateError();
-
+            
             // lowpass filter on the error input
             _error0 = _error1.IsFiniteOrZero() ? _error1 + PosSmoothIn * (_error0 - _error1) : _error0;
-
-            Vector3d controlTorque = GetTotalVesselTorque(vessel);
 
             double deltaT = TimeWarp.fixedDeltaTime;
 
@@ -672,38 +675,26 @@ namespace KSPCommunityFixes.QoL
                     _maxAlpha[i] = 1.0;
                 }
 
+                double maxAlphaCbrt = Math.Pow(_maxAlpha[i], 1.0 / 3.0);
+                double effLD = maxAlphaCbrt * PosFactor;
+                double posKp = Math.Sqrt(_maxAlpha[i] / (2.0 * effLD));
 
-                //if (_maxAlpha[i] == 0.0)
-                //    _maxAlpha[i] = 1.0;
+                if (Math.Abs(error) <= 2.0 * effLD)
+                    // linear ramp down of acceleration
+                    _targetOmega[i] = -posKp * error;
+                else
+                    // v = -sqrt(2 * F * x / m) is target stopping velocity based on distance
+                    _targetOmega[i] = -Math.Sqrt(2 * _maxAlpha[i] * (Math.Abs(error) - effLD)) * Math.Sign(error);
 
-                //if (ac.OmegaTarget[i].IsFinite())
-                //{
-                //    _targetOmega[i] = ac.OmegaTarget[i];
-                //}
-                //else
-                //{
-                    // the cube root scaling was determined mostly via experience
-                    double maxAlphaCbrt = Math.Pow(_maxAlpha[i], 1.0 / 3.0);
-                    double effLD = maxAlphaCbrt * PosFactor;
-                    double posKp = Math.Sqrt(_maxAlpha[i] / (2.0 * effLD));
+                if (useStoppingTime)
+                {
+                    _maxOmega[i] = _maxAlpha[i] * maxStoppingTime;
+                    if (useFlipTime) _maxOmega[i] = Math.Max(_maxOmega[i], Math.PI / minFlipTime);
+                    _targetOmega[i] = AttitudeUtils.Clamp(_targetOmega[i], -_maxOmega[i], _maxOmega[i]);
+                }
 
-                    if (Math.Abs(error) <= 2 * effLD)
-                        // linear ramp down of acceleration
-                        _targetOmega[i] = -posKp * error;
-                    else
-                        // v = - sqrt(2 * F * x / m) is target stopping velocity based on distance
-                        _targetOmega[i] = -Math.Sqrt(2 * _maxAlpha[i] * (Math.Abs(error) - effLD)) * Math.Sign(error);
-
-                    if (useStoppingTime)
-                    {
-                        _maxOmega[i] = _maxAlpha[i] * maxStoppingTime;
-                        if (useFlipTime) _maxOmega[i] = Math.Max(_maxOmega[i], Math.PI / minFlipTime);
-                        _targetOmega[i] = AttitudeUtils.Clamp(_targetOmega[i], -_maxOmega[i], _maxOmega[i]);
-                    }
-
-                    if (useControlRange && _errorTotal * Mathf.Rad2Deg > rollControlRange)
-                        _targetOmega[1] = 0.0;
-                //}
+                if (useControlRange && _errorTotal * Mathf.Rad2Deg > rollControlRange)
+                    _targetOmega[1] = 0.0;
 
                 _pid[i].Kp = VelKp / (_maxAlpha[i] * warpFactor);
                 _pid[i].Ki = VelKi / (_maxAlpha[i] * warpFactor * warpFactor);
@@ -720,18 +711,8 @@ namespace KSPCommunityFixes.QoL
                 // need the negative from the pid due to KSP's orientation of actuation
                 _actuation[i] = -_pid[i].Update(_targetOmega[i], _omega0[i]);
 
-                if (Math.Abs(_actuation[i]) < EPS || double.IsNaN(_actuation[i]))
-                {
+                if (Math.Abs(_actuation[i]) < EPS || double.IsNaN(_actuation[i])) 
                     _actuation[i] = 0;
-                    _targetTorque[i] = 0;
-                }
-                else
-                {
-                    if (availableTorque != 0.0)
-                        _targetTorque[i] = _actuation[i] / availableTorque;
-                    else
-                        _targetTorque[i] = 0.0;
-                }
 
                 if (actuationControl[i] == 0)
                     MechJebResetResetPID(i);
