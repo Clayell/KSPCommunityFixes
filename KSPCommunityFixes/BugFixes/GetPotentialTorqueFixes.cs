@@ -1,4 +1,5 @@
-﻿using HarmonyLib;
+﻿using System;
+using HarmonyLib;
 using System.Collections.Generic;
 using Unity.Profiling;
 using UnityEngine;
@@ -8,7 +9,9 @@ This patch is a rewrite of the stock implementations for `ITorqueProvider.GetPot
 All 4 of the stock implementations have various issues and are generally giving unreliable (not to say plain wrong) results.
 Those issues are commented in each patch, but to summarize :
 - ModuleRectionWheels is mostly ok, its only issue is to ignore the state of "authority limiter" tweakable
-- ModuleRCS is giving entirely random results, and the stcok implementation just doesn't make any sense
+- ModuleRCS is giving entirely random results, and the stcok implementation just doesn't make any sense. Note that compared to
+  other custom implementations (MechJeb, TCA, kOS), the KSPCF implementation account for the RCS module control scheme thrust 
+  clamping and the actual thrust power (instead of the theoretical maximum).
 - ModuleGimbal results are somewhat coherent, but their magnitude for pitch/yaw is wrong. They are underestimated for CoM-aligned 
   engines and vastly overestimated for engines placed off-CoM-center.
 - ModuleControlSurface results are generally unreliable. Beside the fact that they can be randomly negative, the magnitude is
@@ -150,22 +153,26 @@ namespace KSPCommunityFixes.BugFixes
                 || __instance.IsAdjusterBreakingRCS()
                 || __instance.isJustForShow
                 || __instance.flameout
-                || (__instance.part.ShieldedFromAirstream && !__instance.shieldedCanThrust))
+                || (__instance.part.ShieldedFromAirstream && !__instance.shieldedCanThrust)
+                || (!__instance.enablePitch && !__instance.enableRoll && !__instance.enableYaw))
             {
                 rcsProfiler.End();
                 return false;
             }
 
-            Vector3 enabledRotations = new Vector3(__instance.enablePitch ? 1f : 0f, __instance.enableRoll ? 1f : 0f, __instance.enableYaw ? 1f : 0f);
-
-            if (enabledRotations == Vector3.zero)
+            float power = GetMaxRCSPower(__instance);
+            if (power < 0.0001f)
             {
                 rcsProfiler.End();
                 return false;
             }
 
-            float power = __instance.thrusterPower * __instance.thrustPercentage * 0.01f;
-            Vector3 predictedCoM = __instance.vessel.CurrentCoM;
+            Vector3 currentCoM = __instance.vessel.CurrentCoM;
+
+            Quaternion controlRotation = __instance.vessel.ReferenceTransform.rotation;
+            Vector3 pitchCtrl = controlRotation * Vector3.right;
+            Vector3 rollCtrl = controlRotation * Vector3.up;
+            Vector3 yawCtrl = controlRotation * Vector3.forward;
 
             for (int i = __instance.thrusterTransforms.Count - 1; i >= 0; i--)
             {
@@ -174,7 +181,8 @@ namespace KSPCommunityFixes.BugFixes
                 if (thruster.position == Vector3.zero || !thruster.gameObject.activeInHierarchy)
                     continue;
 
-                Vector3 thrusterPosFromCoM = thruster.position - predictedCoM;
+                Vector3 thrusterPosFromCoM = thruster.position - currentCoM;
+                Vector3 thrusterDirFromCoM = thrusterPosFromCoM.normalized;
                 Vector3 thrustDirection = __instance.useZaxis ? thruster.forward : thruster.up;
 
                 float thrusterPower = power;
@@ -182,7 +190,7 @@ namespace KSPCommunityFixes.BugFixes
                 {
                     if (__instance.useLever)
                     {
-                        float leverDistance = __instance.GetLeverDistance(thruster, thrustDirection, predictedCoM);
+                        float leverDistance = __instance.GetLeverDistance(thruster, thrustDirection, currentCoM);
                         if (leverDistance > 1f)
                         {
                             thrusterPower /= leverDistance;
@@ -196,22 +204,38 @@ namespace KSPCommunityFixes.BugFixes
 
                 Vector3 thrusterThrust = thrustDirection * thrusterPower;
                 Vector3 thrusterTorque = Vector3.Cross(thrusterPosFromCoM, thrusterThrust);
-                Vector3 vesselSpaceTorque = Vector3.Scale(__instance.vessel.ReferenceTransform.InverseTransformDirection(thrusterTorque), enabledRotations);
+                // transform in vessel control space
+                thrusterTorque = __instance.vessel.ReferenceTransform.InverseTransformDirection(thrusterTorque);
 
-                if (vesselSpaceTorque.x > 0f)
-                    pos.x += vesselSpaceTorque.x;
-                else
-                    neg.x -= vesselSpaceTorque.x;
+                if (__instance.enablePitch && Math.Abs(thrusterTorque.x) > 0.0001f)
+                {
+                    Vector3 pitchRot = Vector3.Cross(pitchCtrl, Vector3.ProjectOnPlane(thrusterDirFromCoM, pitchCtrl));
+                    float actuation = Vector3.Dot(thrustDirection, pitchRot);
+                    if (actuation > 0f)
+                        pos.x += thrusterTorque.x * actuation;
+                    else
+                        neg.x += thrusterTorque.x * actuation;
+                }
 
-                if (vesselSpaceTorque.y > 0f)
-                    pos.y += vesselSpaceTorque.y;
-                else
-                    neg.y -= vesselSpaceTorque.y;
+                if (__instance.enableRoll && Math.Abs(thrusterTorque.y) > 0.0001f)
+                {
+                    Vector3 rollRot = Vector3.Cross(rollCtrl, Vector3.ProjectOnPlane(thrusterDirFromCoM, rollCtrl));
+                    float actuation = Vector3.Dot(thrustDirection, rollRot);
+                    if (actuation > 0f)
+                        pos.y += thrusterTorque.y * actuation;
+                    else
+                        neg.y += thrusterTorque.y * actuation;
+                }
 
-                if (vesselSpaceTorque.z > 0f)
-                    pos.z += vesselSpaceTorque.z;
-                else
-                    neg.z -= vesselSpaceTorque.z;
+                if (__instance.enableYaw && Math.Abs(thrusterTorque.z) > 0.0001f)
+                {
+                    Vector3 yawRot = Vector3.Cross(yawCtrl, Vector3.ProjectOnPlane(thrusterDirFromCoM, yawCtrl));
+                    float actuation = Vector3.Dot(thrustDirection, yawRot);
+                    if (actuation > 0f)
+                        pos.z += thrusterTorque.z * actuation;
+                    else
+                        neg.z += thrusterTorque.z * actuation;
+                }
             }
 
 #if DEBUG
@@ -224,6 +248,19 @@ namespace KSPCommunityFixes.BugFixes
 #endif
             rcsProfiler.End();
             return false;
+        }
+
+        private static float GetMaxRCSPower(ModuleRCS mrcs)
+        {
+            if (!mrcs.requiresFuel)
+                return 1f; 
+
+            double flowMult = mrcs.flowMult;
+            if (mrcs.useThrustCurve)
+                flowMult *= mrcs.thrustCurveDisplay;
+
+            float result = (float)(flowMult * mrcs.maxFuelFlow * mrcs.exhaustVel * mrcs.thrustPercentage * 0.01);
+            return result;
         }
 
         #endregion

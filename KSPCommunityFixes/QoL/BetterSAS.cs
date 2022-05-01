@@ -643,7 +643,6 @@ namespace KSPCommunityFixes.QoL
         private void UpdatePredictionPI()
         {
             GetTotalVesselTorque(vessel);
-            //GetVesselPotentialTorqueClampedByResponseSpeed();
 
             _omega0 = vessel.angularVelocityD;
 
@@ -664,16 +663,20 @@ namespace KSPCommunityFixes.QoL
                 double error = _error0[i];
 
                 double MOI = vessel.MOI[i];
+
+                // I don't think this is actually correct. The resulting actuation direction (and consequentely which torque value should
+                // be used) doesn't always match the error direction. As it is, I think this kinda work because a correct torque evaluation  
+                // matter a lot more when decelerating than accelerating, but I this might be also be a source of unwanted oscillations 
+                // when the error is small, as well as overshoots when the torque authority is very large (due to effective actuation when
+                // accelerating being higher than predicted).
+                // This being said, all that likely doesn't matter as much as the controller ignoring reaction delay for gimbals and 
+                // control surfaces. I've no idea how to account for that, if that is at all possible in this controller design.
                 double availableTorque = error > 0.0 ? negTorque[i] : posTorque[i];
 
                 if (availableTorque != 0.0 && MOI != 0.0)
-                {
                     _maxAlpha[i] = availableTorque / MOI;
-                }
                 else
-                {
                     _maxAlpha[i] = 1.0;
-                }
 
                 double maxAlphaCbrt = Math.Pow(_maxAlpha[i], 1.0 / 3.0);
                 double effLD = maxAlphaCbrt * PosFactor;
@@ -729,6 +732,7 @@ namespace KSPCommunityFixes.QoL
 
         #endregion
     }
+
 
 
 
