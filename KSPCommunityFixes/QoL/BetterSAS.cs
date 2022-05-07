@@ -45,6 +45,51 @@ namespace KSPCommunityFixes.QoL
                 PatchMethodType.Postfix,
                 AccessTools.Method(typeof(ModuleCommand), nameof(ModuleCommand.OnStart)),
                 this));
+
+            GameEvents.onVesselsUndocking.Add(OnUndockOrDecouple);
+            GameEvents.onPartDeCoupleNewVesselComplete.Add(OnUndockOrDecouple);
+            GameEvents.onPartCoupleComplete.Add(OnDockOrCouple);
+        }
+
+        private void OnDockOrCouple(GameEvents.FromToAction<Part, Part> data)
+        {
+            Part vesselPart = data.to;
+            Part dockingPart = data.from;
+
+            if (!(vesselPart.vessel.autopilot.SAS is KSPCFVesselSAS vesselSAS))
+                return;
+
+            UpdateModuleCommandStateRecursive(dockingPart, vesselSAS.AttitudeControllerGuiName());
+
+            void UpdateModuleCommandStateRecursive(Part part, string eventGuiName)
+            {
+                ModuleCommand mc = part.FindModuleImplementing<ModuleCommand>();
+                if (!ReferenceEquals(mc, null))
+                {
+                    BaseEvent baseEvent = mc.Events[KSPCFVesselSAS.EVENT_HASHCODE];
+                    if (baseEvent != null)
+                        baseEvent.guiName = eventGuiName;
+                }
+
+                int childIdx = part.children.Count;
+                while (childIdx-- > 0)
+                    UpdateModuleCommandStateRecursive(part.children[childIdx], eventGuiName);
+            }
+        }
+
+        private void OnUndockOrDecouple(Vessel oldVessel, Vessel newVessel)
+        {
+            if (!(newVessel.autopilot.SAS is KSPCFVesselSAS newVesselSAS))
+                return;
+
+            if (!(oldVessel.autopilot.SAS is KSPCFVesselSAS oldVesselSAS))
+                return;
+
+            if (newVesselSAS.controller != oldVesselSAS.controller)
+            {
+                newVesselSAS.controller = oldVesselSAS.controller;
+                newVesselSAS.ResetAllPIDS();
+            }
         }
 
         static bool VesselAutopilot_Ctor_Prefix(VesselAutopilot __instance, Vessel vessel)
@@ -144,20 +189,6 @@ namespace KSPCommunityFixes.QoL
             BaseEventDelegate baseEventDelegate = () => KSPCFVesselSAS.OnAttitudeControllerSwitch(__instance);
             BaseEvent baseEvent = __instance.events.Add(KSPCFVesselSAS.EVENT_NAME, baseEventDelegate, attitudeControllerKSPEvent);
             baseEvent.guiName = customSAS.AttitudeControllerGuiName();
-
-            BaseEventDelegate baseEventDelegate2 = () => TorqueTest(__instance);
-            BaseEvent baseEvent2 = __instance.events.Add("Torquetest", baseEventDelegate2, attitudeControllerKSPEvent);
-            baseEvent2.guiName = "Torque test";
-        }
-
-        static void TorqueTest(ModuleCommand module)
-        {
-            Debug.Log("======= LOGGING VESSEL TORQUE PROVIDERS =======");
-            foreach (ITorqueProvider torqueProvider in module.vessel.FindPartModulesImplementing<ITorqueProvider>())
-            {
-                torqueProvider.GetPotentialTorque(out Vector3 pos, out Vector3 neg);
-                Debug.Log($"pos={pos} neg={neg} {torqueProvider.GetType()} - {((PartModule)torqueProvider).part.partInfo.name}");
-            }
         }
     }
 
@@ -165,11 +196,11 @@ namespace KSPCommunityFixes.QoL
     {
         public enum AttitudeController
         {
-            Stock = 1,
-            MechJeb = 2
+            StockSAS = 1,
+            PreciseController = 2
         }
 
-        public AttitudeController controller = AttitudeController.MechJeb;
+        public AttitudeController controller = AttitudeController.PreciseController;
 
         public KSPCFVesselSAS(Vessel v) : base(v)
         {
@@ -179,10 +210,10 @@ namespace KSPCommunityFixes.QoL
         {
             switch (controller)
             {
-                case AttitudeController.Stock:
+                case AttitudeController.StockSAS:
                     StockSASControlUpdate(s);
                     break;
-                case AttitudeController.MechJeb:
+                case AttitudeController.PreciseController:
                     MechJebControlUpdate(s);
                     break;
             }
@@ -192,12 +223,12 @@ namespace KSPCommunityFixes.QoL
         {
             switch (controller)
             {
-                case AttitudeController.Stock:
+                case AttitudeController.StockSAS:
                     pidLockedPitch.Reset();
                     pidLockedRoll.Reset();
                     pidLockedYaw.Reset();
                     break;
-                case AttitudeController.MechJeb:
+                case AttitudeController.PreciseController:
                     MechJebResetResetPID(0);
                     MechJebResetResetPID(1);
                     MechJebResetResetPID(2);
@@ -250,6 +281,7 @@ namespace KSPCommunityFixes.QoL
         }
 
         public const string EVENT_NAME = "KSPCFAttitudeControllerSwitch";
+        public static readonly int EVENT_HASHCODE = EVENT_NAME.GetHashCode();
 
         public static void OnAttitudeControllerSwitch(ModuleCommand origin)
         {
@@ -260,18 +292,18 @@ namespace KSPCommunityFixes.QoL
 
             switch (customSAS.controller)
             {
-                case AttitudeController.Stock:
-                    customSAS.controller = AttitudeController.MechJeb;
+                case AttitudeController.StockSAS:
+                    customSAS.controller = AttitudeController.PreciseController;
                     break;
-                case AttitudeController.MechJeb:
-                    customSAS.controller = AttitudeController.Stock;
+                case AttitudeController.PreciseController:
+                    customSAS.controller = AttitudeController.StockSAS;
                     break;
             }
 
             string guiName = customSAS.AttitudeControllerGuiName();
             foreach (ModuleCommand moduleCommand in origin.vessel.FindPartModulesImplementing<ModuleCommand>())
             {
-                BaseEvent baseEvent = moduleCommand.Events[EVENT_NAME];
+                BaseEvent baseEvent = moduleCommand.Events[EVENT_HASHCODE];
                 if (baseEvent != null)
                     baseEvent.guiName = guiName;
             }
@@ -283,9 +315,9 @@ namespace KSPCommunityFixes.QoL
         {
             switch (controller)
             {
-                case AttitudeController.MechJeb:
-                    return "Attitude controller: MechJeb™";
-                case AttitudeController.Stock:
+                case AttitudeController.PreciseController:
+                    return "Attitude controller: PreciseController";
+                case AttitudeController.StockSAS:
                     return "Attitude controller: Stock SAS";
             }
 
@@ -482,12 +514,12 @@ namespace KSPCommunityFixes.QoL
         private readonly double VelB = 0.596313214751797;
         private readonly double VelC = 0.596313214751797;
         private readonly double VelSmoothIn = 0.3;
-        private readonly double VelSmoothOut = 1;
-        private readonly double PosSmoothIn = 1;
+        private readonly double VelSmoothOut = 1.0;
+        private readonly double PosSmoothIn = 1.0;
         private readonly double PosFactor = 1.0;
         private readonly double maxStoppingTime = 2.0;
-        private readonly double minFlipTime = 60;
-        private readonly double rollControlRange = 5;
+        private readonly double minFlipTime = 30;
+        private readonly double rollControlRange = 5.0;
         private bool useControlRange = true;
         private bool useFlipTime = true;
         private bool useStoppingTime = true;
@@ -515,17 +547,7 @@ namespace KSPCommunityFixes.QoL
             new PIDLoop()
         };
 
-        // ORGINIALLY IN MechJebModuleAttitudeController
-        private Vector3d actuationControl = Vector3d.one;
-        // END
-
         private Quaternion attitudeTarget;
-
-
-        public void SetActuationControl(bool pitch, bool yaw, bool roll)
-        {
-            actuationControl = new Vector3d(pitch ? 1 : 0, roll ? 1 : 0, yaw ? 1 : 0);
-        }
 
         private void MechJebControlUpdate(FlightCtrlState st)
         {
@@ -542,9 +564,7 @@ namespace KSPCommunityFixes.QoL
 
             Vector3d act = _actuation;
 
-            act.Scale(actuationControl);
-
-            SetFlightCtrlState(act, st, 1);
+            SetFlightCtrlState(act, st);
         }
 
         private void UpdateAttitudeTarget()
@@ -563,19 +583,11 @@ namespace KSPCommunityFixes.QoL
             }
         }
 
-        private void SetFlightCtrlState(Vector3d act, FlightCtrlState s, float drive_limit)
+        private void SetFlightCtrlState(Vector3d act, FlightCtrlState s)
         {
-            bool userCommandingPitch = !Mathfx.Approx(s.pitch, s.pitchTrim, 0.1F);
-            bool userCommandingYaw = !Mathfx.Approx(s.yaw, s.yawTrim, 0.1F);
-            bool userCommandingRoll = !Mathfx.Approx(s.roll, s.rollTrim, 0.1F);
-
-            // we will need that...
-            //if (attitudeKILLROT)
-            //    if (lastReferencePart != vessel.GetReferenceTransformPart() || userCommandingPitch || userCommandingYaw || userCommandingRoll)
-            //    {
-            //        attitudeTo(Quaternion.LookRotation(vessel.GetTransform().up, -vessel.GetTransform().forward), AttitudeReference.INERTIAL, null);
-            //        lastReferencePart = vessel.GetReferenceTransformPart();
-            //    }
+            bool userCommandingPitch = !Mathfx.Approx(s.pitch, s.pitchTrim, 0.1f);
+            bool userCommandingYaw = !Mathfx.Approx(s.yaw, s.yawTrim, 0.1f);
+            bool userCommandingRoll = !Mathfx.Approx(s.roll, s.rollTrim, 0.1f);
 
             if (userCommandingPitch)
                 MechJebResetResetPID(0);
@@ -588,12 +600,15 @@ namespace KSPCommunityFixes.QoL
 
             if (!userCommandingRoll)
                 if (!double.IsNaN(act.y))
-                    s.roll = Mathf.Clamp((float)act.y, -drive_limit, drive_limit);
+                    s.roll = Mathf.Clamp((float)act.y, -1f, 1f);
 
             if (!userCommandingPitch && !userCommandingYaw)
             {
-                if (!double.IsNaN(act.x)) s.pitch = Mathf.Clamp((float)act.x, -drive_limit, drive_limit);
-                if (!double.IsNaN(act.z)) s.yaw = Mathf.Clamp((float)act.z, -drive_limit, drive_limit);
+                if (!double.IsNaN(act.x)) 
+                    s.pitch = Mathf.Clamp((float)act.x, -1f, 1f);
+
+                if (!double.IsNaN(act.z)) 
+                    s.yaw = Mathf.Clamp((float)act.z, -1f, 1f);
             }
         }
 
@@ -609,7 +624,7 @@ namespace KSPCommunityFixes.QoL
             if (lockedMode)
                 deltaRotation = Quaternion.identity;
             else
-                deltaRotation = Quaternion.Inverse(vesselTransform.transform.rotation * Quaternion.Euler(-90, 0, 0)) * attitudeTarget;
+                deltaRotation = Quaternion.Inverse(vesselTransform.transform.rotation * Quaternion.Euler(-90f, 0f, 0f)) * attitudeTarget;
 
             // get us some euler angles for the target transform
             Vector3d ea = deltaRotation.eulerAngles;
@@ -618,12 +633,12 @@ namespace KSPCommunityFixes.QoL
             double roll = ea[2] * UtilMath.Deg2Rad;
 
             // law of cosines for the "distance" of the miss in radians
-            _errorTotal = Math.Acos(AttitudeUtils.Clamp(Math.Cos(pitch) * Math.Cos(yaw), -1, 1));
+            _errorTotal = Math.Acos(AttitudeUtils.Clamp(Math.Cos(pitch) * Math.Cos(yaw), -1.0, 1.0));
 
             // this is the initial direction of the great circle route of the requested transform
             // (pitch is latitude, yaw is -longitude, and we are "navigating" from 0,0)
             // doing this calculation is the ship frame is a bit easier to reason about.
-            var temp = new Vector3d(Math.Sin(pitch), Math.Cos(pitch) * Math.Sin(-yaw), 0);
+            var temp = new Vector3d(Math.Sin(pitch), Math.Cos(pitch) * Math.Sin(-yaw), 0.0);
             temp = temp.normalized * _errorTotal;
 
             // we assemble phi in the pitch, roll, yaw basis that vessel.MOI uses (right handed basis)
@@ -692,7 +707,10 @@ namespace KSPCommunityFixes.QoL
                 if (useStoppingTime)
                 {
                     _maxOmega[i] = _maxAlpha[i] * maxStoppingTime;
-                    if (useFlipTime) _maxOmega[i] = Math.Max(_maxOmega[i], Math.PI / minFlipTime);
+
+                    if (useFlipTime) 
+                        _maxOmega[i] = Math.Max(_maxOmega[i], Math.PI / minFlipTime);
+
                     _targetOmega[i] = AttitudeUtils.Clamp(_targetOmega[i], -_maxOmega[i], _maxOmega[i]);
                 }
 
@@ -716,9 +734,6 @@ namespace KSPCommunityFixes.QoL
 
                 if (Math.Abs(_actuation[i]) < EPS || double.IsNaN(_actuation[i])) 
                     _actuation[i] = 0;
-
-                if (actuationControl[i] == 0)
-                    MechJebResetResetPID(i);
             }
 
             _error1 = _error0;
@@ -732,9 +747,6 @@ namespace KSPCommunityFixes.QoL
 
         #endregion
     }
-
-
-
 
     public static class AttitudeUtils
     {
@@ -751,6 +763,18 @@ namespace KSPCommunityFixes.QoL
         {
             return vector.x.IsFiniteOrZero() && vector.y.IsFiniteOrZero() && vector.z.IsFiniteOrZero();
         }
+
+        public static bool IsNaN(this Vector3 vector)
+        {
+#pragma warning disable CS1718 // Comparison made to same variable
+            return vector.x != vector.x || vector.y != vector.y || vector.z != vector.z;
+#pragma warning restore CS1718 // Comparison made to same variable
+        }
+
+        public static Vector3 ClampComponents(this Vector3 v, Vector3 min, Vector3 max) =>
+            new Vector3(Mathf.Clamp(v.x, min.x, max.x),
+                Mathf.Clamp(v.y, min.y, max.y),
+                Mathf.Clamp(v.z, min.z, max.z));
 
         /// <summary>Clamp a value between min and max</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -781,15 +805,15 @@ namespace KSPCommunityFixes.QoL
 
         public static double ClampRadiansTwoPi(double angle)
         {
-            angle = angle % (2 * Math.PI);
-            if (angle < 0) return angle + 2 * Math.PI;
+            angle = angle % (2.0 * Math.PI);
+            if (angle < 0) return angle + 2.0 * Math.PI;
             else return angle;
         }
 
         public static double ClampRadiansPi(double angle)
         {
             angle = ClampRadiansTwoPi(angle);
-            if (angle > Math.PI) angle -= 2 * Math.PI;
+            if (angle > Math.PI) angle -= 2.0 * Math.PI;
             return angle;
         }
 

@@ -1,6 +1,7 @@
 ﻿using System;
 using HarmonyLib;
 using System.Collections.Generic;
+using KSPCommunityFixes.QoL;
 using Unity.Profiling;
 using UnityEngine;
 
@@ -174,11 +175,23 @@ namespace KSPCommunityFixes.BugFixes
             Vector3 rollCtrl = controlRotation * Vector3.up;
             Vector3 yawCtrl = controlRotation * Vector3.forward;
 
+            float minRotActuation;
+            bool checkActuation = RCSLimiter.moduleRCSExtensions != null;
+            if (checkActuation && RCSLimiter.moduleRCSExtensions.TryGetValue(__instance, out RCSLimiter.ModuleRCSExtension limits))
+            {
+                minRotActuation = Mathf.Max(Mathf.Cos(limits.minRotationAlignement * Mathf.Deg2Rad), 0f);
+            }
+            else
+            {
+                minRotActuation = 0f;
+                checkActuation = __instance.fullThrust;
+            }
+
             for (int i = __instance.thrusterTransforms.Count - 1; i >= 0; i--)
             {
                 Transform thruster = __instance.thrusterTransforms[i];
 
-                if (thruster.position == Vector3.zero || !thruster.gameObject.activeInHierarchy)
+                if (!thruster.gameObject.activeInHierarchy)
                     continue;
 
                 Vector3 thrusterPosFromCoM = thruster.position - currentCoM;
@@ -210,31 +223,70 @@ namespace KSPCommunityFixes.BugFixes
                 if (__instance.enablePitch && Math.Abs(thrusterTorque.x) > 0.0001f)
                 {
                     Vector3 pitchRot = Vector3.Cross(pitchCtrl, Vector3.ProjectOnPlane(thrusterDirFromCoM, pitchCtrl));
-                    float actuation = Vector3.Dot(thrustDirection, pitchRot);
-                    if (actuation > 0f)
-                        pos.x += thrusterTorque.x * actuation;
-                    else
-                        neg.x += thrusterTorque.x * actuation;
+                    float actuation = Vector3.Dot(thrustDirection, pitchRot.normalized);
+
+                    if (checkActuation)
+                    {
+                        float actuationMagnitude = Math.Abs(actuation);
+                        if (actuationMagnitude < minRotActuation)
+                            actuation = 0f;
+                        else if (__instance.fullThrust && actuationMagnitude > __instance.fullThrustMin)
+                            actuation = Math.Sign(actuation);
+                    }
+
+                    if (actuation != 0f)
+                    {
+                        if (actuation > 0f)
+                            pos.x += thrusterTorque.x * actuation;
+                        else
+                            neg.x += thrusterTorque.x * actuation;
+                    }
                 }
 
                 if (__instance.enableRoll && Math.Abs(thrusterTorque.y) > 0.0001f)
                 {
                     Vector3 rollRot = Vector3.Cross(rollCtrl, Vector3.ProjectOnPlane(thrusterDirFromCoM, rollCtrl));
-                    float actuation = Vector3.Dot(thrustDirection, rollRot);
-                    if (actuation > 0f)
-                        pos.y += thrusterTorque.y * actuation;
-                    else
-                        neg.y += thrusterTorque.y * actuation;
+                    float actuation = Vector3.Dot(thrustDirection, rollRot.normalized);
+
+                    if (checkActuation)
+                    {
+                        float actuationMagnitude = Math.Abs(actuation);
+                        if (actuationMagnitude < minRotActuation)
+                            actuation = 0f;
+                        else if (__instance.fullThrust && actuationMagnitude > __instance.fullThrustMin)
+                            actuation = Math.Sign(actuation);
+                    }
+
+                    if (actuation != 0f)
+                    {
+                        if (actuation > 0f)
+                            pos.y += thrusterTorque.y * actuation;
+                        else
+                            neg.y += thrusterTorque.y * actuation;
+                    }
                 }
 
                 if (__instance.enableYaw && Math.Abs(thrusterTorque.z) > 0.0001f)
                 {
                     Vector3 yawRot = Vector3.Cross(yawCtrl, Vector3.ProjectOnPlane(thrusterDirFromCoM, yawCtrl));
-                    float actuation = Vector3.Dot(thrustDirection, yawRot);
-                    if (actuation > 0f)
-                        pos.z += thrusterTorque.z * actuation;
-                    else
-                        neg.z += thrusterTorque.z * actuation;
+                    float actuation = Vector3.Dot(thrustDirection, yawRot.normalized);
+
+                    if (checkActuation)
+                    {
+                        float actuationMagnitude = Math.Abs(actuation);
+                        if (actuationMagnitude < minRotActuation)
+                            actuation = 0f;
+                        else if (__instance.fullThrust && actuationMagnitude > __instance.fullThrustMin)
+                            actuation = Math.Sign(actuation);
+                    }
+
+                    if (actuation != 0f)
+                    {
+                        if (actuation > 0f)
+                            pos.z += thrusterTorque.z * actuation;
+                        else
+                            neg.z += thrusterTorque.z * actuation;
+                    }
                 }
             }
 
