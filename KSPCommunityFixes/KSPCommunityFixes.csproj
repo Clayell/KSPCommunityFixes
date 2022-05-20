@@ -102,6 +102,7 @@
     <Compile Include="BugFixes\RoboticsDrift.cs" />
     <Compile Include="BugFixes\ROCValidationOOR.cs" />
     <Compile Include="BugFixes\StockAlarmDescPreserveLineBreak.cs" />
+    <Compile Include="Internal\EditorPhysics.cs" />
     <Compile Include="Modding\BaseFieldListUseFieldHost.cs" />
     <Compile Include="Performance\NoLiftInSpace.cs" />
     <Compile Include="QoL\BetterSAS.cs" />

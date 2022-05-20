@@ -67,16 +67,6 @@ namespace KSPCommunityFixes.QoL
                 AccessTools.Method(typeof(ModuleRCS), nameof(ModuleRCS.Update)),
                 this));
 
-            patches.Add(new PatchInfo(
-                PatchMethodType.Postfix,
-                AccessTools.Method(typeof(DeltaVAppSituation), nameof(DeltaVAppSituation.UpdatePressureDisplay)),
-                this));
-
-            GameEvents.onEditorShipModified.Add(OnEditorShipModified);
-            GameEvents.onDeltaVAppAtmosphereChanged.Add(OnDeltaVAppAtmosphereChanged);
-            GameEvents.OnControlPointChanged.Add(OnControlPointChanged);
-            GameEvents.onGameSceneLoadRequested.Add(OnGameSceneLoadRequested);
-
             moduleRCSExtensions = new Dictionary<ModuleRCS, ModuleRCSExtension>();
 
             autoLOC_6001330_Pitch = Localizer.Format("#autoLOC_6001330");
@@ -121,14 +111,6 @@ namespace KSPCommunityFixes.QoL
         private static string autoLOC_Ventral;
         private static string autoLOC_Fore;
         private static string autoLOC_Aft;
-
-        private static Vector3 EditorCoM => EditorMarker_CoM.CraftCoM;
-        private static Transform editorReferenceTransform;
-        private static Part editorReferencePart;
-        private static int editorReferencePartShipIndex;
-        private static float editorStaticPressureAtm;
-        private static int lastShipModificationFrame;
-        private static int lastShipStatsUpdateFrame;
 
         internal static Dictionary<ModuleRCS, ModuleRCSExtension> moduleRCSExtensions;
 
@@ -183,7 +165,7 @@ namespace KSPCommunityFixes.QoL
                 minRotationAlignementKSPField.guiFormat = "0°";
                 minRotationAlignementKSPField.isPersistant = true;
 
-                minRotationAlignementControl.minValue = 0f;
+                minRotationAlignementControl.minValue = 5f;
                 minRotationAlignementControl.maxValue = 90f;
                 minRotationAlignementControl.stepIncrement = 1f;
                 minRotationAlignementControl.affectSymCounterparts = UI_Scene.All;
@@ -194,7 +176,7 @@ namespace KSPCommunityFixes.QoL
                 minLinearAlignementKSPField.guiFormat = "0°";
                 minLinearAlignementKSPField.isPersistant = true;
 
-                minLinearAlignementControl.minValue = 0f;
+                minLinearAlignementControl.minValue = 5f;
                 minLinearAlignementControl.maxValue = 90f;
                 minLinearAlignementControl.stepIncrement = 1f;
                 minLinearAlignementControl.affectSymCounterparts = UI_Scene.All;
@@ -471,124 +453,6 @@ namespace KSPCommunityFixes.QoL
             }
         }
 
-        #region Editor event handling
-
-        private void OnGameSceneLoadRequested(GameScenes data)
-        {
-            editorReferenceTransform = null;
-            editorReferencePart = null;
-            editorReferencePartShipIndex = -1;
-            editorStaticPressureAtm = 0f;
-            lastShipModificationFrame = 0;
-            lastShipStatsUpdateFrame = 0;
-        }
-
-        private void OnControlPointChanged(Part part, ControlPoint controlPoint)
-        {
-            if (HighLogic.LoadedScene != GameScenes.EDITOR || EditorLogic.fetch.ship == null)
-                return;
-
-            int partIndex = EditorLogic.fetch.ship.Parts.IndexOf(part);
-            if (partIndex < 0)
-                return;
-
-            lastShipModificationFrame = Time.frameCount;
-            editorReferenceTransform = controlPoint.transform;
-            editorReferencePart = part;
-            editorReferencePartShipIndex = partIndex;
-        }
-
-        private void OnDeltaVAppAtmosphereChanged(DeltaVSituationOptions data)
-        {
-            lastShipModificationFrame = Time.frameCount;
-        }
-
-        private void OnEditorShipModified(ShipConstruct ship)
-        {
-            if (ship != EditorLogic.fetch.ship || ship.parts.Count == 0)
-                return;
-
-            lastShipModificationFrame = Time.frameCount;
-        }
-
-        // OnDeltaVAppAtmosphereChanged isn't fired when the altitude is modified, so implement our own event
-        static void DeltaVAppSituation_UpdatePressureDisplay_Postfix()
-        {
-            lastShipModificationFrame = Time.frameCount;
-        }
-
-        static void EditorUpdateShipStats()
-        {
-            if (EditorLogic.fetch.ship == null || EditorLogic.fetch.ship.parts.Count == 0)
-                return;
-
-            if (DeltaVGlobals.fetch != null && DeltaVGlobals.ready && DeltaVGlobals.DeltaVAppValues.body != null)
-            {
-                if (!DeltaVGlobals.DeltaVAppValues.body.atmosphere || DeltaVGlobals.DeltaVAppValues.situation == DeltaVSituationOptions.Vaccum)
-                {
-                    editorStaticPressureAtm = 0f;
-                }
-                else
-                {
-                    if (DeltaVGlobals.DeltaVAppValues.situation == DeltaVSituationOptions.Altitude)
-                        editorStaticPressureAtm = (float)(DeltaVGlobals.DeltaVAppValues.body.GetPressure(DeltaVGlobals.DeltaVAppValues.altitude) * 0.0098692326671601278);
-                    else
-                        editorStaticPressureAtm = (float)(DeltaVGlobals.DeltaVAppValues.body.GetPressure(0.0) * 0.0098692326671601278);
-                }
-            }
-            else
-            {
-                editorStaticPressureAtm = 0f;
-            }
-
-            if (editorReferenceTransform == null || EditorLogic.fetch.ship.Parts.IndexOf(editorReferencePart) != editorReferencePartShipIndex)
-            {
-                if (!GetFirstReferenceTransform(EditorLogic.RootPart, ref editorReferenceTransform, ref editorReferencePart))
-                {
-                    editorReferencePart = EditorLogic.RootPart;
-                    editorReferenceTransform = EditorLogic.RootPart.referenceTransform;
-                }
-
-                editorReferencePartShipIndex = EditorLogic.fetch.ship.Parts.IndexOf(editorReferencePart);
-            }
-
-            bool GetFirstReferenceTransform(Part part, ref Transform referenceTransform, ref Part referencePart)
-            {
-                if (part.isControlSource != Vessel.ControlLevel.NONE)
-                {
-                    ModuleCommand mc = part.FindModuleImplementing<ModuleCommand>();
-                    if (mc != null && mc.controlPoints != null && mc.controlPoints.TryGetValue(mc.activeControlPointName, out ControlPoint ctrlPoint))
-                        referenceTransform = ctrlPoint.transform;
-                    else
-                        referenceTransform = part.referenceTransform;
-
-                    referencePart = part;
-                    return true;
-                }
-
-                int childIdx = part.children.Count;
-                while (childIdx-- > 0)
-                {
-                    if (GetFirstReferenceTransform(part.children[childIdx], ref referenceTransform, ref referencePart))
-                        return true;
-                }
-
-                return false;
-            }
-
-            EditorMarker_CoM comMarker = EditorVesselOverlays.fetch.CoMmarker;
-            if (comMarker == null)
-                return;
-
-            if (!comMarker.isActiveAndEnabled)
-            {
-                comMarker.rootPart = EditorLogic.RootPart;
-                comMarker.UpdatePosition();
-            }
-        }
-
-        #endregion
-
         #region Editor PAW update
 
         static void ModuleRCS_Update_Postfix(ModuleRCS __instance)
@@ -613,16 +477,13 @@ namespace KSPCommunityFixes.QoL
                 return;
             }
 
-            if (lastShipStatsUpdateFrame < lastShipModificationFrame)
+            if (EditorPhysics.TryGetAndUpdate(out EditorPhysics editorPhysics))
             {
-                lastShipStatsUpdateFrame = lastShipModificationFrame;
-                EditorUpdateShipStats();
-            }
-
-            if (rcsExt.lastTorqueUpdateFrame == 0 || rcsExt.lastTorqueUpdateFrame < lastShipModificationFrame)
-            {
-                rcsExt.lastTorqueUpdateFrame = lastShipModificationFrame;
-                __instance.StartCoroutine(UpdatePAWDelayed(__instance, rcsExt));
+                if (rcsExt.lastTorqueUpdateFrame < editorPhysics.lastShipModificationFrame)
+                {
+                    rcsExt.lastTorqueUpdateFrame = editorPhysics.lastShipModificationFrame;
+                    __instance.StartCoroutine(UpdatePAWDelayed(__instance, rcsExt));
+                }
             }
         }
 
@@ -630,11 +491,14 @@ namespace KSPCommunityFixes.QoL
         {
             yield return null;
 
-            mrcs.realISP = mrcs.atmosphereCurve.Evaluate(editorStaticPressureAtm);
-            double exhaustVel = mrcs.realISP * mrcs.G * mrcs.ispMult;
-            float thrustForce = (float)(exhaustVel * mrcs.maxFuelFlow * mrcs.flowMult * mrcs.thrustPercentage * 0.01);
+            if (EditorPhysics.TryGetAndUpdate(out EditorPhysics editorPhysics))
+            {
+                mrcs.realISP = mrcs.atmosphereCurve.Evaluate((float)editorPhysics.atmStaticPressure);
+                double exhaustVel = mrcs.realISP * mrcs.G * mrcs.ispMult;
+                float thrustForce = (float)(exhaustVel * mrcs.maxFuelFlow * mrcs.flowMult * mrcs.thrustPercentage * 0.01);
 
-            rcsExt.UpdatePAWTorqueAndForces(editorReferenceTransform, thrustForce, EditorCoM);
+                rcsExt.UpdatePAWTorqueAndForces(editorPhysics.referenceTransform, thrustForce, editorPhysics.CoM);
+            }
         }
 
 

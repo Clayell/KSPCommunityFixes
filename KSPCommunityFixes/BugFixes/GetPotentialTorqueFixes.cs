@@ -1,9 +1,14 @@
 ﻿using System;
+using System.Collections;
 using HarmonyLib;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using KSP.Localization;
 using KSPCommunityFixes.QoL;
 using Unity.Profiling;
 using UnityEngine;
+using UnityEngine.UIElements;
+using Random = UnityEngine.Random;
 
 /*
 This patch is a rewrite of the stock implementations for `ITorqueProvider.GetPotentialTorque(out Vector3 pos, out Vector3 neg)`.
@@ -106,15 +111,47 @@ namespace KSPCommunityFixes.BugFixes
                 this));
 
             patches.Add(new PatchInfo(
+                PatchMethodType.Postfix,
+                AccessTools.Method(typeof(ModuleControlSurface), nameof(ModuleControlSurface.OnStart)),
+                this));
+
+            patches.Add(new PatchInfo(
                 PatchMethodType.Prefix,
                 AccessTools.Method(typeof(ModuleGimbal), nameof(ModuleGimbal.GetPotentialTorque)),
                 this));
+
+            patches.Add(new PatchInfo(
+                PatchMethodType.Postfix,
+                AccessTools.Method(typeof(ModuleGimbal), nameof(ModuleGimbal.OnStart)),
+                this));
+
+            autoLOC_6001330_Pitch = Localizer.Format("#autoLOC_6001330");
+            autoLOC_6001331_Yaw = Localizer.Format("#autoLOC_6001331");
+            autoLOC_6001332_Roll = Localizer.Format("#autoLOC_6001332");
+
+            KSPCommunityFixes.Instance.StartCoroutine(CustomUpdate());
         }
+
+        private IEnumerator CustomUpdate()
+        {
+            Repeat:
+            ModuleGimbalExtension.UpdateInstances();
+            ModuleCtrlSrfExtension.UpdateInstances();
+            yield return null;
+            goto Repeat;
+        }
+
+        private static string autoLOC_6001330_Pitch;
+        private static string autoLOC_6001331_Yaw;
+        private static string autoLOC_6001332_Roll;
 
         static ProfilerMarker rwProfiler = new ProfilerMarker("ModuleReactionWheel.GetPotentialTorque");
         static ProfilerMarker rcsProfiler = new ProfilerMarker("ModuleRCS.GetPotentialTorque");
         static ProfilerMarker ctrlSrfProfiler = new ProfilerMarker("ModuleControlSurface.GetPotentialTorque");
+        
         static ProfilerMarker gimbalProfiler = new ProfilerMarker("ModuleGimbal.GetPotentialTorque");
+        static ProfilerMarker gimbalCacheProfiler = new ProfilerMarker("ModuleGimbal.GetPotentialTorque.CacheCheck");
+        static ProfilerMarker gimbalCacheInProfiler = new ProfilerMarker("ModuleGimbal.GetPotentialTorque.CacheCheckIn");
 
         #region ModuleReactionWheel
 
@@ -341,20 +378,271 @@ namespace KSPCommunityFixes.BugFixes
         // induce a torque in the opposite direction. For example, a negative pos.x value mean that for a positive roll actuation (ctrlState.roll > 0),
         // the control surface will produce a torque incuding a negative roll, essentially reducing the total available torque in that direction.
 
+
+        // stuff we don't have in the editor : nVel, Qlift, part.machNumber, Qdrag, baseLiftForce
+
+        private class ModuleCtrlSrfExtension
+        {
+            private static Dictionary<ModuleControlSurface, ModuleCtrlSrfExtension> instances = new Dictionary<ModuleControlSurface, ModuleCtrlSrfExtension>();
+
+            public static ModuleCtrlSrfExtension Get(ModuleControlSurface module)
+            {
+                if (instances.TryGetValue(module, out ModuleCtrlSrfExtension gimbalExt))
+                    return gimbalExt;
+
+                return new ModuleCtrlSrfExtension(module);
+            }
+
+            private ModuleControlSurface module;
+
+            public Vector3 pos;
+            public Vector3 neg;
+
+
+
+            public Vector3 worldCoM;
+            public Vector3 localCoM;
+            public Vector3 nVel;
+            public Vector3 neutralForce;
+            public double QLift;
+            public double QDrag;
+            public float currentDeployAngle;
+            public float machNumber;
+
+            public float lastTime;
+            public Vector3 lastBaseLiftForce;
+            private bool lastPitch;
+            private bool lastRoll;
+            private bool lastYaw;
+
+            private bool pawTorqueEnabled;
+            private BaseField ignorePitchField;
+            private BaseField ignoreRollField;
+            private BaseField ignoreYawField;
+
+            public ModuleCtrlSrfExtension(ModuleControlSurface module)
+            {
+                this.module = module;
+
+                ignorePitchField = module.Fields[nameof(ModuleControlSurface.ignorePitch)];
+                ignoreRollField = module.Fields[nameof(ModuleControlSurface.ignoreRoll)];
+                ignoreYawField = module.Fields[nameof(ModuleControlSurface.ignoreYaw)];
+
+                module.part.OnJustAboutToBeDestroyed += OnDestroy;
+                instances.Add(module, this);
+            }
+
+            public void OnDestroy()
+            {
+                module.part.OnJustAboutToBeDestroyed -= OnDestroy;
+                instances.Remove(module);
+                module = null;
+            }
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public void UpdateCachedState(Vector3 worldCoM, Vector3 localCoM)
+            {
+                this.worldCoM = worldCoM;
+                this.localCoM = localCoM;
+                lastTime = Time.fixedTime;
+                nVel = module.nVel;
+                QLift = module.Qlift;
+                QDrag = module.Qdrag;
+                machNumber = (float)module.part.machNumber;
+
+                if (module.deploy)
+                {
+                    currentDeployAngle = module.currentDeployAngle;
+                    Vector3 rhsNeutral = Quaternion.AngleAxis(currentDeployAngle, module.baseTransform.rotation * Vector3.right) * module.baseTransform.forward;
+                    float dotNeutral = Vector3.Dot(nVel, rhsNeutral);
+                    float absDotNeutral = Mathf.Abs(dotNeutral);
+                    neutralForce = module.GetLiftVector(rhsNeutral, dotNeutral, absDotNeutral, QLift, machNumber) * module.ctrlSurfaceArea;
+                    neutralForce += GetDragForce(module, this, absDotNeutral);
+                }
+                else
+                {
+                    currentDeployAngle = 0f;
+                    neutralForce = module.baseLiftForce * module.ctrlSurfaceArea;
+                    neutralForce += GetDragForce(module, this, module.absDot);
+                }
+
+                lastBaseLiftForce = module.baseLiftForce;
+                lastPitch = module.ignorePitch;
+                lastRoll = module.ignoreRoll;
+                lastYaw = module.ignoreYaw;
+            }
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public bool IsCacheValid(Vector3 worldCoM, Vector3 localCoM)
+            { 
+                if ((QLift > 0.0 && Math.Abs((module.Qlift / QLift) - 1.0) > Random.Range(0.04f, 0.06f))
+                  || (this.localCoM - localCoM).sqrMagnitude > 0.1f * 0.1f
+                  || (lastBaseLiftForce - module.baseLiftForce).sqrMagnitude > 0.1f * 0.1f
+                  || lastTime + Random.Range(0.75f, 1.25f) < Time.fixedTime
+                  || currentDeployAngle != module.currentDeployAngle
+                  || lastPitch != module.ignorePitch || lastRoll != module.ignoreRoll || lastYaw != module.ignoreYaw)
+                {
+                    UpdateCachedState(worldCoM, localCoM);
+                    return true;
+                }
+
+                return false;
+            }
+
+            public void UpdateEditorState(Transform referenceTransform, EditorPhysics editorPhysics)
+            {
+                if (editorPhysics.atmDensity == 0.0)
+                    return;
+
+                worldCoM = editorPhysics.CoM;
+
+                nVel = referenceTransform.up; // velocity normalized
+
+                currentDeployAngle = module.deploy ? module.currentDeployAngle : 0f;
+
+                double dynamicPressureKpa = editorPhysics.atmDensity;
+                double speed = 100.0; // just assume 100m/s for now
+
+                dynamicPressureKpa *= 0.0005 * speed * speed;
+                QLift = dynamicPressureKpa * 1000.0;
+                QDrag = dynamicPressureKpa * 1000.0;
+
+                double speedOfSound = editorPhysics.body.GetSpeedOfSound(editorPhysics.atmStaticPressureKpa, editorPhysics.atmDensity);
+                if (speedOfSound > 0.0)
+                    machNumber = (float)(speed / speedOfSound);
+                else
+                    machNumber = 0f;
+
+                Vector3 rhsNeutral = Quaternion.AngleAxis(currentDeployAngle, module.baseTransform.rotation * Vector3.right) * module.baseTransform.forward;
+                float dotNeutral = Vector3.Dot(nVel, rhsNeutral);
+                float absDotNeutral = Mathf.Abs(dotNeutral);
+                neutralForce = GetLiftForce(module, this, rhsNeutral, dotNeutral, absDotNeutral) * module.ctrlSurfaceArea;
+                neutralForce += GetDragForce(module, this, absDotNeutral);
+            }
+
+            public static void UpdateInstances()
+            {
+                foreach (ModuleCtrlSrfExtension moduleExtension in instances.Values)
+                {
+                    try
+                    {
+                        if (moduleExtension.module.isActiveAndEnabled && !moduleExtension.module.displaceVelocity)
+                            moduleExtension.UpdatePAW();
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogException(e);
+                    }
+                }
+            }
+
+            private void UpdatePAW()
+            {
+                if (!ActuationToggleDisplayed(module))
+                {
+                    if (pawTorqueEnabled)
+                        DisablePAWTorque();
+
+                    return;
+                }
+
+                ModuleControlSurface_GetPotentialTorque_Prefix(module, out Vector3 pos, out Vector3 neg);
+
+                if (pos == Vector3.zero && neg == Vector3.zero)
+                {
+                    if (pawTorqueEnabled)
+                        DisablePAWTorque();
+
+                    return;
+                }
+
+                pawTorqueEnabled = true;
+
+                if (!module.ignorePitch)
+                    SetToggleGuiName(ignorePitchField, $"{autoLOC_6001330_Pitch}: {Math.Round(pos.x, 3):G3} / {-Math.Round(neg.x, 3):G3} kNm");
+                else
+                    SetToggleGuiName(ignorePitchField, autoLOC_6001330_Pitch);
+
+                if (!module.ignoreRoll)
+                    SetToggleGuiName(ignoreRollField, $"{autoLOC_6001332_Roll}: {Math.Round(pos.y, 3):G3} / {-Math.Round(neg.y, 3):G3} kNm");
+                else
+                    SetToggleGuiName(ignoreRollField, autoLOC_6001332_Roll);
+
+                if (!module.ignoreYaw)
+                    SetToggleGuiName(ignoreYawField, $"{autoLOC_6001331_Yaw}: {Math.Round(pos.z, 3):G3} / {-Math.Round(neg.z, 3):G3} kNm");
+                else
+                    SetToggleGuiName(ignoreYawField, autoLOC_6001331_Yaw);
+            }
+
+            private void DisablePAWTorque()
+            {
+                pawTorqueEnabled = false;
+                SetToggleGuiName(ignorePitchField, autoLOC_6001330_Pitch);
+                SetToggleGuiName(ignoreRollField, autoLOC_6001332_Roll);
+                SetToggleGuiName(ignoreYawField, autoLOC_6001331_Yaw);
+            }
+
+            static bool ActuationToggleDisplayed(ModuleControlSurface module)
+            {
+                if (module.part.PartActionWindow == null || !module.part.PartActionWindow.isActiveAndEnabled)
+                    return false;
+
+                return true;
+            }
+
+            private static void SetToggleGuiName(BaseField baseField, string guiName)
+            {
+                baseField.guiName = guiName;
+
+                UIPartActionToggle toggle;
+
+                if (!baseField.uiControlEditor.partActionItem.IsNullOrDestroyed())
+                    toggle = (UIPartActionToggle)baseField.uiControlEditor.partActionItem;
+                else if (!baseField.uiControlFlight.partActionItem.IsNullOrDestroyed())
+                    toggle = (UIPartActionToggle)baseField.uiControlFlight.partActionItem;
+                else
+                    return;
+
+                toggle.fieldName.text = guiName;
+                ((RectTransform)toggle.fieldName.transform).sizeDelta = new Vector2(150f, toggle.fieldName.rectTransform.sizeDelta.y);
+            }
+        }
+
+        static void ModuleControlSurface_OnStart_Postfix(ModuleControlSurface __instance)
+        {
+            ModuleCtrlSrfExtension.Get(__instance);
+        }
+
         static bool ModuleControlSurface_GetPotentialTorque_Prefix(ModuleControlSurface __instance, out Vector3 pos, out Vector3 neg)
         {
             ctrlSrfProfiler.Begin();
             pos = Vector3.zero;
             neg = Vector3.zero;
 
-            if (__instance.Qlift == 0.0 || (__instance.ignorePitch && __instance.ignoreYaw && __instance.ignoreRoll))
+            bool isEditor = HighLogic.LoadedScene == GameScenes.EDITOR;
+
+            if (isEditor)
             {
-                ctrlSrfProfiler.End();
-                return false;
+                if (__instance.ignorePitch && __instance.ignoreYaw && __instance.ignoreRoll)
+                {
+                    ctrlSrfProfiler.End();
+                    return false;
+                }
+            }
+            else
+            {
+                if (__instance.Qlift < 1.0 || (__instance.ignorePitch && __instance.ignoreYaw && __instance.ignoreRoll))
+                {
+                    ctrlSrfProfiler.End();
+                    return false;
+                }
             }
 
             if (__instance.displaceVelocity)
             {
+                if (isEditor)
+                    return false;
+
                 // This case is for handling "propeller blade" control surfaces. Those have a completely different behavior and
                 // actuation scheme (and why this wasn't implemented as a separate module is beyond my understanding).
                 // This is the stock GetPotentialTorque() implementation for them, I've no idea how correct it is and just don't
@@ -374,35 +662,48 @@ namespace KSPCommunityFixes.BugFixes
                 // - It always substract `baseLiftForce` which is always the non-deployed lift vector, resulting in the positive deflection being twice
                 //   what it should be and the negative deflection being always zero.
 
-                float deployAngle;
-                Vector3 neutralForce;
-                if (!__instance.deploy)
+                ModuleCtrlSrfExtension moduleExt;
+                Transform vesselReferenceTransform;
+
+                if (isEditor)
                 {
-                    deployAngle = 0f;
-                    neutralForce = __instance.baseLiftForce * __instance.ctrlSurfaceArea;
-                    neutralForce += GetDragForce(__instance, __instance.absDot, (float) __instance.part.machNumber);
+                    if (!EditorPhysics.TryGetAndUpdate(out EditorPhysics editorPhysics) || editorPhysics.atmDensity == 0.0)
+                    {
+                        gimbalProfiler.End();
+                        return false;
+                    }
+
+                    vesselReferenceTransform = editorPhysics.referenceTransform;
+                    moduleExt = ModuleCtrlSrfExtension.Get(__instance);
+                    moduleExt.UpdateEditorState(vesselReferenceTransform, editorPhysics);
                 }
                 else
                 {
-                    deployAngle = __instance.currentDeployAngle;
-                    Vector3 rhsNeutral = Quaternion.AngleAxis(deployAngle, __instance.baseTransform.rotation * Vector3.right) * __instance.baseTransform.forward;
-                    float dotNeutral = Vector3.Dot(__instance.nVel, rhsNeutral);
-                    float absDotNeutral = Mathf.Abs(dotNeutral);
-                    float machNumber = (float) __instance.part.machNumber;
-                    neutralForce = __instance.GetLiftVector(rhsNeutral, dotNeutral, absDotNeutral, __instance.Qlift, machNumber) * __instance.ctrlSurfaceArea;
-                    neutralForce += GetDragForce(__instance, absDotNeutral, machNumber);
+                    vesselReferenceTransform = __instance.vessel.ReferenceTransform;
+
+                    gimbalCacheProfiler.Begin();
+
+                    moduleExt = ModuleCtrlSrfExtension.Get(__instance);
+                    if (!moduleExt.IsCacheValid(__instance.vessel.CurrentCoM, vesselReferenceTransform.InverseTransformPoint(__instance.vessel.CurrentCoM)))
+                    {
+                        pos = moduleExt.pos;
+                        neg = moduleExt.neg;
+                        gimbalCacheProfiler.End();
+                        gimbalProfiler.End();
+                        return false;
+                    }
+                    gimbalCacheProfiler.End();
                 }
 
-                Vector3 potentialForcePos = GetPotentialLiftAndDrag(__instance, deployAngle, true);
-                Vector3 potentialForceNeg = GetPotentialLiftAndDrag(__instance, deployAngle, false);
+                Vector3 potentialForcePos = GetPotentialLiftAndDrag(__instance, moduleExt, moduleExt.currentDeployAngle, true);
+                Vector3 potentialForceNeg = GetPotentialLiftAndDrag(__instance, moduleExt, moduleExt.currentDeployAngle, false);
 
-                Vector3 currentCoM = __instance.vessel.CurrentCoM;
-                Vector3 partPosition = __instance.part.Rigidbody.worldCenterOfMass - currentCoM;
+                Vector3 partPosition = __instance.part.Rigidbody.worldCenterOfMass - moduleExt.worldCoM;
 
-                Vector3 posTorque = __instance.vessel.ReferenceTransform.InverseTransformDirection(Vector3.Cross(partPosition, potentialForcePos));
-                Vector3 negTorque = __instance.vessel.ReferenceTransform.InverseTransformDirection(Vector3.Cross(partPosition, potentialForceNeg));
+                Vector3 posTorque = vesselReferenceTransform.InverseTransformDirection(Vector3.Cross(partPosition, potentialForcePos));
+                Vector3 negTorque = vesselReferenceTransform.InverseTransformDirection(Vector3.Cross(partPosition, potentialForceNeg));
 
-                Vector3 neutralTorque = __instance.vessel.ReferenceTransform.InverseTransformDirection(Vector3.Cross(partPosition, neutralForce));
+                Vector3 neutralTorque = vesselReferenceTransform.InverseTransformDirection(Vector3.Cross(partPosition, moduleExt.neutralForce));
 
                 posTorque -= neutralTorque;
                 negTorque -= neutralTorque;
@@ -422,7 +723,7 @@ namespace KSPCommunityFixes.BugFixes
                 {
                     deployAction = __instance.usesMirrorDeploy
                         ? ((__instance.deployInvert ? (-1f) : 1f) * (__instance.partDeployInvert ? (-1f) : 1f) * (__instance.mirrorDeploy ? (-1f) : 1f))
-                        : ((__instance.deployInvert ? (-1f) : 1f) * Mathf.Sign((Quaternion.Inverse(__instance.vessel.ReferenceTransform.rotation) * (__instance.baseTransform.position - currentCoM)).x));
+                        : ((__instance.deployInvert ? (-1f) : 1f) * Mathf.Sign((Quaternion.Inverse(vesselReferenceTransform.rotation) * (__instance.baseTransform.position - moduleExt.worldCoM)).x));
 
                     deployAction *= -1f;
                 }
@@ -431,7 +732,7 @@ namespace KSPCommunityFixes.BugFixes
                     deployAction = 0f;
                 }
 
-                Vector3 comRelPos = __instance.baseTransform.InverseTransformPoint(currentCoM);
+                Vector3 comRelPos = __instance.baseTransform.InverseTransformPoint(moduleExt.worldCoM);
 
 #if DEBUG
                 Vector3 posAction = Vector3.zero;
@@ -440,7 +741,7 @@ namespace KSPCommunityFixes.BugFixes
 
                 if (!__instance.ignorePitch)
                 {
-                    Vector3 pitchVector = __instance.vessel.ReferenceTransform.rotation * new Vector3(1f, 0f, 0f);
+                    Vector3 pitchVector = vesselReferenceTransform.rotation * new Vector3(1f, 0f, 0f);
                     float pitchActionPos = Vector3.Dot(pitchVector, __instance.baseTransform.rotation * Vector3.right);
                     if (comRelPos.y < 0f)
                         pitchActionPos = -pitchActionPos;
@@ -476,7 +777,7 @@ namespace KSPCommunityFixes.BugFixes
 
                 if (!__instance.ignoreYaw)
                 {
-                    Vector3 yawVector = __instance.vessel.ReferenceTransform.rotation * new Vector3(0f, 0f, 1f);
+                    Vector3 yawVector = vesselReferenceTransform.rotation * new Vector3(0f, 0f, 1f);
                     float yawActionPos = Vector3.Dot(yawVector, __instance.baseTransform.rotation * Vector3.right);
                     if (comRelPos.y < 0f)
                         yawActionPos = -yawActionPos;
@@ -516,8 +817,8 @@ namespace KSPCommunityFixes.BugFixes
                     Vector3 rhs = new Vector3(comRelPos.x, 0f, comRelPos.z);
 
                     float rollActionPos = Vector3.Dot(Vector3.right, rhs)
-                                          * (1f - (Mathf.Abs(Vector3.Dot(rhs.normalized, Quaternion.Inverse(__instance.baseTransform.rotation) * __instance.vessel.ReferenceTransform.up)) * 0.5f + 0.5f))
-                                          * Mathf.Sign(Vector3.Dot(__instance.baseTransform.up, __instance.vessel.ReferenceTransform.up))
+                                          * (1f - (Mathf.Abs(Vector3.Dot(rhs.normalized, Quaternion.Inverse(__instance.baseTransform.rotation) * vesselReferenceTransform.up)) * 0.5f + 0.5f))
+                                          * Mathf.Sign(Vector3.Dot(__instance.baseTransform.up, vesselReferenceTransform.up))
                                           * Mathf.Sign(__instance.ctrlSurfaceRange)
                                           * -1f;
 
@@ -566,6 +867,9 @@ namespace KSPCommunityFixes.BugFixes
                     ui.Fields["negAction"].guiActive = true;
                     ui.negAction = negAction;
                 }
+
+                moduleExt.pos = pos;
+                moduleExt.neg = neg;
 #endif
             }
 
@@ -573,30 +877,51 @@ namespace KSPCommunityFixes.BugFixes
             return false;
         }
 
-        public static Vector3 GetPotentialLiftAndDrag(ModuleControlSurface mcs, float deployAngle, bool positiveDeflection)
+        private static Vector3 GetPotentialLiftAndDrag(ModuleControlSurface mcs, ModuleCtrlSrfExtension moduleExt, float deployAngle, bool positiveDeflection)
         {
             float deflectionDir = positiveDeflection ? 1f : -1f;
             float angle = deployAngle + (deflectionDir * mcs.ctrlSurfaceRange * mcs.authorityLimiter * 0.01f);
             Vector3 rhs = Quaternion.AngleAxis(angle, mcs.baseTransform.rotation * Vector3.right) * mcs.baseTransform.forward;
-            float dot = Vector3.Dot(mcs.nVel, rhs);
+            float dot = Vector3.Dot(moduleExt.nVel, rhs);
             float absDot = Mathf.Abs(dot);
-            float machNumber = (float) mcs.part.machNumber;
-            Vector3 result = mcs.GetLiftVector(rhs, dot, absDot, mcs.Qlift, machNumber) * mcs.ctrlSurfaceArea;
-            result += GetDragForce(mcs, absDot, machNumber);
+            Vector3 result = GetLiftForce(mcs, moduleExt, rhs, dot, absDot) * mcs.ctrlSurfaceArea;
+            result += GetDragForce(mcs, moduleExt, absDot);
             return result;
         }
 
-        public static Vector3 GetDragForce(ModuleControlSurface mcs, float absDot, float machNumber)
+        private static Vector3 GetLiftForce(ModuleControlSurface mcs, ModuleCtrlSrfExtension moduleExt, Vector3 liftVector, float liftDot, float absDot)
+        {
+            if (mcs.nodeEnabled && mcs.attachNode.attachedPart != null)
+            {
+                return Vector3.zero;
+            }
+            float liftScalar = Mathf.Sign(liftDot) * mcs.liftCurve.Evaluate(absDot) * mcs.liftMachCurve.Evaluate(moduleExt.machNumber);
+            liftScalar *= mcs.deflectionLiftCoeff;
+            if (liftScalar != 0f && !float.IsNaN(liftScalar))
+            {
+                liftScalar = (float)(moduleExt.QLift * PhysicsGlobals.LiftMultiplier * liftScalar);
+                if (mcs.perpendicularOnly)
+                {
+                    Vector3 vector = -liftVector * liftScalar;
+                    vector = Vector3.ProjectOnPlane(vector, -moduleExt.nVel);
+                    return vector;
+                }
+                return -liftVector * liftScalar;
+            }
+            return Vector3.zero;
+        }
+
+        private static Vector3 GetDragForce(ModuleControlSurface mcs, ModuleCtrlSrfExtension moduleExt, float absDot)
         {
             if (!mcs.useInternalDragModel || (mcs.nodeEnabled && mcs.attachNode.attachedPart != null))
                 return Vector3.zero;
 
-            float dragScalar = mcs.dragCurve.Evaluate(absDot) * mcs.dragMachCurve.Evaluate(machNumber);
+            float dragScalar = mcs.dragCurve.Evaluate(absDot) * mcs.dragMachCurve.Evaluate(moduleExt.machNumber);
             dragScalar *= mcs.deflectionLiftCoeff;
             if (dragScalar != 0f && !float.IsNaN(dragScalar))
             {
-                dragScalar = (float) mcs.Qdrag * dragScalar * PhysicsGlobals.LiftDragMultiplier;
-                return -mcs.nVel * dragScalar * mcs.ctrlSurfaceArea;
+                dragScalar = (float)moduleExt.QDrag * dragScalar * PhysicsGlobals.LiftDragMultiplier;
+                return -moduleExt.nVel * dragScalar * mcs.ctrlSurfaceArea;
             }
 
             return Vector3.zero;
@@ -606,6 +931,179 @@ namespace KSPCommunityFixes.BugFixes
 
         #region ModuleGimbal
 
+        private class ModuleGimbalExtension
+        {
+            private static Dictionary<ModuleGimbal, ModuleGimbalExtension> instances = new Dictionary<ModuleGimbal, ModuleGimbalExtension>();
+
+            public static ModuleGimbalExtension Get(ModuleGimbal module)
+            {
+                if (instances.TryGetValue(module, out ModuleGimbalExtension gimbalExt))
+                    return gimbalExt;
+
+                return new ModuleGimbalExtension(module);
+            }
+
+            private ModuleGimbal module;
+
+            public Vector3 pos;
+            public Vector3 neg;
+
+            private Vector3 lastLocalCoM;
+            private float lastThrustForce;
+            private float lastTime;
+            private float lastGimbalLimiter;
+            private bool lastPitch;
+            private bool lastRoll;
+            private bool lastYaw;
+
+            private bool pawTorqueEnabled;
+            private BaseField enablePitchField;
+            private BaseField enableRollField;
+            private BaseField enableYawField;
+
+            public ModuleGimbalExtension(ModuleGimbal module)
+            {
+                this.module = module;
+
+                enablePitchField = module.Fields[nameof(ModuleGimbal.enablePitch)];
+                enableRollField = module.Fields[nameof(ModuleGimbal.enableRoll)];
+                enableYawField = module.Fields[nameof(ModuleGimbal.enableYaw)];
+
+                module.part.OnJustAboutToBeDestroyed += OnDestroy;
+                instances.Add(module, this);
+            }
+
+            public void OnDestroy()
+            {
+                module.part.OnJustAboutToBeDestroyed -= OnDestroy;
+                instances.Remove(module);
+                module = null;
+            }
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public void UpdateLastState(Vector3 localCoM, float thrustForce)
+            {
+                lastLocalCoM = localCoM;
+                lastThrustForce = thrustForce;
+                lastTime = Time.fixedTime;
+                lastGimbalLimiter = module.gimbalLimiter;
+                lastPitch = module.enablePitch;
+                lastRoll = module.enableRoll;
+                lastYaw = module.enableYaw;
+            }
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public bool UpdateRequired(Vector3 localCoM, float thrustForce)
+            {
+                if (Math.Abs(lastThrustForce - thrustForce) > 1.0
+                    || (lastLocalCoM - localCoM).sqrMagnitude > 0.1f * 0.1f
+                    || lastTime + Random.Range(0.75f, 1.25f) < Time.fixedTime
+                    || lastGimbalLimiter != module.gimbalLimiter
+                    || lastPitch != module.enablePitch || lastRoll != module.enableRoll || lastYaw != module.enableYaw)
+                {
+                    UpdateLastState(localCoM, thrustForce);
+                    return true;
+                }
+
+                return false;
+            }
+
+            public static void UpdateInstances()
+            {
+                foreach (ModuleGimbalExtension moduleExtension in instances.Values)
+                {
+                    try
+                    {
+                        if (moduleExtension.module.isActiveAndEnabled)
+                            moduleExtension.UpdatePAW();
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogException(e);
+                    }
+                }
+            }
+
+            private void UpdatePAW()
+            {
+                if (!ActuationToggleDisplayed(module))
+                {
+                    if (pawTorqueEnabled)
+                        DisablePAWTorque();
+
+                    return;
+                }
+
+                ModuleGimbal_GetPotentialTorque_Prefix(module, out Vector3 pos, out Vector3 neg);
+
+                if (pos == Vector3.zero && neg == Vector3.zero)
+                {
+                    if (pawTorqueEnabled)
+                        DisablePAWTorque();
+
+                    return;
+                }
+
+                pawTorqueEnabled = true;
+
+                if (module.enablePitch)
+                    SetToggleGuiName(enablePitchField, $"{autoLOC_6001330_Pitch}: {Math.Round(pos.x, 3):G3} / {-Math.Round(neg.x, 3):G3} kNm");
+                else
+                    SetToggleGuiName(enablePitchField, autoLOC_6001330_Pitch);
+
+                if (module.enableRoll)
+                    SetToggleGuiName(enableRollField, $"{autoLOC_6001332_Roll}: {Math.Round(pos.y, 3):G3} / {-Math.Round(neg.y, 3):G3} kNm");
+                else
+                    SetToggleGuiName(enableRollField, autoLOC_6001332_Roll);
+
+                if (module.enableYaw)
+                    SetToggleGuiName(enableYawField, $"{autoLOC_6001331_Yaw}: {Math.Round(pos.z, 3):G3} / {-Math.Round(neg.z, 3):G3} kNm");
+                else
+                    SetToggleGuiName(enableYawField, autoLOC_6001331_Yaw);
+            }
+
+            private void DisablePAWTorque()
+            {
+                pawTorqueEnabled = false;
+                SetToggleGuiName(enablePitchField, autoLOC_6001330_Pitch);
+                SetToggleGuiName(enableRollField, autoLOC_6001332_Roll);
+                SetToggleGuiName(enableYawField, autoLOC_6001331_Yaw);
+            }
+
+            static bool ActuationToggleDisplayed(ModuleGimbal module)
+            {
+                if (!module.showToggles || !module.currentShowToggles)
+                    return false;
+
+                if (module.part.PartActionWindow == null || !module.part.PartActionWindow.isActiveAndEnabled)
+                    return false;
+
+                return true;
+            }
+
+            private static void SetToggleGuiName(BaseField baseField, string guiName)
+            {
+                baseField.guiName = guiName;
+
+                UIPartActionToggle toggle;
+
+                if (!baseField.uiControlEditor.partActionItem.IsNullOrDestroyed())
+                    toggle = (UIPartActionToggle)baseField.uiControlEditor.partActionItem;
+                else if (!baseField.uiControlFlight.partActionItem.IsNullOrDestroyed())
+                    toggle = (UIPartActionToggle)baseField.uiControlFlight.partActionItem;
+                else
+                    return;
+
+                toggle.fieldName.text = guiName;
+                ((RectTransform)toggle.fieldName.transform).sizeDelta = new Vector2(150f, toggle.fieldName.rectTransform.sizeDelta.y);
+            }
+        }
+
+        static void ModuleGimbal_OnStart_Postfix(ModuleGimbal __instance)
+        {
+            ModuleGimbalExtension.Get(__instance);
+        }
+
         static bool ModuleGimbal_GetPotentialTorque_Prefix(ModuleGimbal __instance, out Vector3 pos, out Vector3 neg)
         {
             gimbalProfiler.Begin();
@@ -613,7 +1111,32 @@ namespace KSPCommunityFixes.BugFixes
             pos = Vector3.zero;
             neg = Vector3.zero;
 
-            if (__instance.gimbalLock || !__instance.gimbalActive || !__instance.moduleIsEnabled || (!__instance.enablePitch && !__instance.enableRoll && !__instance.enableYaw))
+            bool isEditor = HighLogic.LoadedScene == GameScenes.EDITOR;
+
+            if (isEditor)
+            {
+                if (__instance.gimbalLock
+                    || !__instance.moduleIsEnabled
+                    || (!__instance.enablePitch && !__instance.enableRoll && !__instance.enableYaw))
+                {
+                    gimbalProfiler.End();
+                    return false;
+                }
+            }
+            else
+            {
+                if (__instance.gimbalLock 
+                    || !__instance.gimbalActive 
+                    || !__instance.moduleIsEnabled 
+                    || (!__instance.enablePitch && !__instance.enableRoll && !__instance.enableYaw))
+                {
+                    gimbalProfiler.End();
+                    return false;
+                }
+            }
+
+            // ensure we don't create a cache entry when the part is destroyed
+            if (__instance.part.State == PartStates.DEAD)
             {
                 gimbalProfiler.End();
                 return false;
@@ -622,24 +1145,68 @@ namespace KSPCommunityFixes.BugFixes
             if (__instance.engineMultsList == null)
                 __instance.CreateEngineList();
 
-            Vector3 worldCoM = __instance.vessel.CurrentCoM;
-            Transform vesselReferenceTransform = __instance.vessel.ReferenceTransform;
+            ModuleGimbalExtension gimbalCache;
+            Vector3 worldCoM;
+            Vector3 localCoM;
+            Transform vesselReferenceTransform;
+            int transformIndex;
+            EditorPhysics editorPhysics;
 
-            int transformIndex = __instance.gimbalTransforms.Count;
+            if (isEditor)
+            {
+                if (!EditorPhysics.TryGetAndUpdate(out editorPhysics))
+                {
+                    gimbalProfiler.End();
+                    return false;
+                }
+
+                worldCoM = editorPhysics.CoM;
+                vesselReferenceTransform = editorPhysics.referenceTransform;
+                localCoM = vesselReferenceTransform.InverseTransformPoint(worldCoM);
+                gimbalCache = ModuleGimbalExtension.Get(__instance);
+            }
+            else
+            {
+                editorPhysics = null;
+
+                float totalThrust = 0f;
+                transformIndex = __instance.gimbalTransforms.Count;
+                while (transformIndex-- > 0)
+                {
+                    int engineIndex = __instance.engineMultsList[transformIndex].Count;
+                    while (engineIndex-- > 0)
+                        totalThrust += __instance.engineMultsList[transformIndex][engineIndex].Key.finalThrust;
+                }
+
+                if (totalThrust == 0f)
+                {
+                    gimbalProfiler.End();
+                    return false;
+                }
+
+                worldCoM = __instance.vessel.CurrentCoM;
+                vesselReferenceTransform = __instance.vessel.ReferenceTransform;
+                localCoM = vesselReferenceTransform.InverseTransformPoint(worldCoM);
+
+                gimbalCacheProfiler.Begin();
+
+                gimbalCache = ModuleGimbalExtension.Get(__instance);
+                if (!gimbalCache.UpdateRequired(localCoM, totalThrust))
+                {
+                    pos = gimbalCache.pos;
+                    neg = gimbalCache.neg;
+                    gimbalCacheProfiler.End();
+                    gimbalProfiler.End();
+                    return false;
+                }
+                gimbalCacheProfiler.End();
+            }
+
+            transformIndex = __instance.gimbalTransforms.Count;
             while (transformIndex-- > 0)
             {
                 List<KeyValuePair<ModuleEngines, float>> engines = __instance.engineMultsList[transformIndex];
-                int engineIndex = engines.Count;
-
-                // bail out as early as possible to avoid useless processing when engines are inactive
-                bool providesThrust = false;
-                while (engineIndex-- > 0)
-                    if (engines[engineIndex].Key.finalThrust > 0f)
-                        providesThrust = true;
-
-                if (!providesThrust)
-                    continue;
-
+                
                 Transform gimbalTransform = __instance.gimbalTransforms[transformIndex];
 
                 // this is the neutral gimbalTransform.localRotation
@@ -657,15 +1224,15 @@ namespace KSPCommunityFixes.BugFixes
                 Vector3 yawNegTorque = Vector3.zero;
 
                 Vector3 controlPoint = vesselReferenceTransform.InverseTransformPoint(gimbalTransform.position);
-                Vector3 localCoM = vesselReferenceTransform.InverseTransformPoint(worldCoM);
+
                 bool inversedControl = localCoM.y < controlPoint.y;
 
                 Quaternion pitchPosActuation;
                 Quaternion pitchNegActuation;
                 if (__instance.enablePitch)
                 {
-                    pitchPosActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.right, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
-                    pitchNegActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.left, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
+                    pitchPosActuation = GetGimbalWorldRotation(__instance, vesselReferenceTransform, gimbalTransform, Vector3.right, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
+                    pitchNegActuation = GetGimbalWorldRotation(__instance, vesselReferenceTransform, gimbalTransform, Vector3.left, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
                 }
                 else
                 {
@@ -677,8 +1244,8 @@ namespace KSPCommunityFixes.BugFixes
                 Quaternion rollNegActuation;
                 if (__instance.enableRoll)
                 {
-                    rollPosActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.up, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
-                    rollNegActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.down, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
+                    rollPosActuation = GetGimbalWorldRotation(__instance, vesselReferenceTransform, gimbalTransform, Vector3.up, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
+                    rollNegActuation = GetGimbalWorldRotation(__instance, vesselReferenceTransform, gimbalTransform, Vector3.down, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
                 }
                 else
                 {
@@ -690,8 +1257,8 @@ namespace KSPCommunityFixes.BugFixes
                 Quaternion yawNegActuation;
                 if (__instance.enableYaw)
                 {
-                    yawPosActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.forward, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
-                    yawNegActuation = GetGimbalWorldRotation(__instance, gimbalTransform, Vector3.back, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
+                    yawPosActuation = GetGimbalWorldRotation(__instance, vesselReferenceTransform, gimbalTransform, Vector3.forward, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
+                    yawNegActuation = GetGimbalWorldRotation(__instance, vesselReferenceTransform, gimbalTransform, Vector3.back, controlPoint, inversedControl, neutralLocalRot, neutralWorldRot);
                 }
                 else
                 {
@@ -699,14 +1266,28 @@ namespace KSPCommunityFixes.BugFixes
                     yawNegActuation = Quaternion.identity;
                 }
 
-                engineIndex = engines.Count;
+                int engineIndex = engines.Count;
                 while (engineIndex-- > 0)
                 {
                     KeyValuePair<ModuleEngines, float> engineThrustMultiplier = engines[engineIndex];
 
                     ModuleEngines engine = engineThrustMultiplier.Key;
                     float thrustMultiplier = engineThrustMultiplier.Value;
-                    float thrustMagnitude = engine.finalThrust * thrustMultiplier;
+
+                    float thrustMagnitude;
+                    if (isEditor)
+                    {
+                        if (editorPhysics.atmStaticPressure == 0f)
+                            thrustMagnitude = engine.MaxThrustOutputVac(true);
+                        else
+                            thrustMagnitude = engine.MaxThrustOutputAtm(true, true, (float)editorPhysics.atmStaticPressure, editorPhysics.atmTemperature, editorPhysics.atmDensity);
+                    }
+                    else
+                    {
+                        thrustMagnitude = engine.finalThrust;
+                    }
+
+                    thrustMagnitude *= thrustMultiplier;
 
                     if (thrustMagnitude <= 0f)
                         continue;
@@ -778,6 +1359,10 @@ namespace KSPCommunityFixes.BugFixes
                 }
             }
 
+            gimbalCache.pos = pos;
+            gimbalCache.neg = neg;
+
+            gimbalProfiler.End();
 #if DEBUG
             TorqueUIModule ui = __instance.part.FindModuleImplementing<TorqueUIModule>();
             if (ui != null)
@@ -786,11 +1371,10 @@ namespace KSPCommunityFixes.BugFixes
                 ui.neg = neg;
             }
 #endif
-            gimbalProfiler.End();
             return false;
         }
 
-        static Quaternion GetGimbalWorldRotation(ModuleGimbal mg, Transform gimbalTransform, Vector3 ctrlState, Vector3 controlPoint, bool inversedControl, Quaternion neutralLocalRot, Quaternion neutralWorldRot)
+        static Quaternion GetGimbalWorldRotation(ModuleGimbal mg, Transform referenceTransform, Transform gimbalTransform, Vector3 ctrlState, Vector3 controlPoint, bool inversedControl, Quaternion neutralLocalRot, Quaternion neutralWorldRot)
         {
             if (inversedControl)
             {
@@ -815,7 +1399,7 @@ namespace KSPCommunityFixes.BugFixes
             // To work around that, we call InverseTransformDirection() on the parent, then apply the neutral rotation.
             Vector3 localActuation = 
                 Quaternion.Inverse(neutralLocalRot) 
-                * gimbalTransform.parent.InverseTransformDirection(mg.vessel.ReferenceTransform.TransformDirection(ctrlState));
+                * gimbalTransform.parent.InverseTransformDirection(referenceTransform.TransformDirection(ctrlState));
 
             // get actuation angles
             localActuation.x = Mathf.Clamp(localActuation.x, -1f, 1f) * ((localActuation.x > 0f) ? mg.gimbalRangeXP : mg.gimbalRangeXN) * mg.gimbalLimiter * 0.01f;
