@@ -104,6 +104,7 @@
     <Compile Include="BugFixes\PAWItemOrder.cs" />
     <Compile Include="BugFixes\RoboticsDrift.cs" />
     <Compile Include="BugFixes\ROCValidationOOR.cs" />
+    <Compile Include="BugFixes\ScatterDistribution.cs" />
     <Compile Include="BugFixes\StockAlarmDescPreserveLineBreak.cs" />
     <Compile Include="Internal\EditorPhysics.cs" />
     <Compile Include="Modding\BaseFieldListUseFieldHost.cs" />
