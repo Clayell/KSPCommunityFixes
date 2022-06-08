@@ -23,13 +23,13 @@ namespace KSPCommunityFixes.QoL
                 this));
         }
 
-        public static bool enableManeuverTool = true;
+        public static bool enableManeuverTool = false;
 
         protected override void OnLoadData(ConfigNode node)
         {
             if (!node.TryGetValue(nameof(enableManeuverTool), ref enableManeuverTool))
             {
-                enableManeuverTool = true;
+                enableManeuverTool = false;
             }
         }
 
