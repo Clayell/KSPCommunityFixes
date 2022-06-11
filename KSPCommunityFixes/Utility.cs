@@ -2,15 +2,17 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using KSP.Localization;
 using UnityEngine;
 
 namespace KSPCommunityFixes
 {
-    static class UnityObjectExtensions
+#pragma warning disable IDE0041 // Use 'is null' check
+    static class UnityExtensions
     {
         /// <summary>
-        /// True if this reference to an UnityEngine.Object is destroyed (or not yet initialized).
+        /// True if this <paramref name="unityObject"/> instance is destroyed or not yet initialized.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool IsDestroyed(this UnityEngine.Object unityObject)
@@ -19,17 +21,26 @@ namespace KSPCommunityFixes
         }
 
         /// <summary>
-        /// True if this reference to an UnityEngine.Object is null.
+        /// True if this <paramref name="unityObject"/> reference is <c>null</c>.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static bool IsNull(this UnityEngine.Object unityObject)
+        public static bool IsNullRef(this UnityEngine.Object unityObject)
         {
             return ReferenceEquals(unityObject, null);
         }
 
         /// <summary>
-        /// True if this reference to an UnityEngine.Object is null, or if the underlying C++ object is destroyed.<br/>
-        /// Equivalent as testing <c>object == null</c> but faster.
+        /// True if this <paramref name="unityObject"/> reference is not <c>null</c>.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool IsNotNullRef(this UnityEngine.Object unityObject)
+        {
+            return !ReferenceEquals(unityObject, null);
+        }
+
+        /// <summary>
+        /// True if this <paramref name="unityObject"/> reference is <c>null</c> or if the instance is destroyed<br/>
+        /// Equivalent as testing <c><paramref name="unityObject"/> == null</c> but several times faster.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool IsNullOrDestroyed(this UnityEngine.Object unityObject)
@@ -38,13 +49,21 @@ namespace KSPCommunityFixes
         }
 
         /// <summary>
-        /// Return "null" when the reference to the UnityEngine.Object is null or if the underlying C++ object is destroyed/not initialized.<br/>
-        /// Allow using null conditional and null coalescing operators with classes deriving from UnityEngine.Object while keeping the
-        /// "a destroyed object is equal to null" Unity concept.<br/>
+        /// True if this <paramref name="unityObject"/> reference is not <c>null</c> and the instance is not destroyed<br/>
+        /// Equivalent as testing <c><paramref name="unityObject"/> != null</c> but several times faster.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool IsNotNullOrDestroyed(this UnityEngine.Object unityObject)
+        {
+            return !ReferenceEquals(unityObject, null) && unityObject.m_CachedPtr != IntPtr.Zero;
+        }
+
+        /// <summary>
+        /// Return <c>null</c> when this <paramref name="unityObject"/> reference is null or destroyed, otherwise return the <paramref name="unityObject"/> instance<br/>
+        /// Allow using null conditional and null coalescing operators with UnityEngine.Object derivatives while conforming to the "a destroyed object is equal to null" Unity concept.<br/>
         /// Example :<br/>
         /// <c>float x = myUnityObject.AsNull()?.myFloatField ?? 0f;</c><br/>
-        /// will evaluate to <c>0f</c> when <c>myUnityObject</c> is destroyed, instead of returning the value still
-        /// available on the managed instance.
+        /// will evaluate to <c>0f</c> when <c>myUnityObject</c> is destroyed, instead of returning the value still available on the managed instance.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static T AsNull<T>(this T unityObject) where T : UnityEngine.Object
@@ -55,6 +74,7 @@ namespace KSPCommunityFixes
             return unityObject;
         }
     }
+#pragma warning restore IDE0041 // Use 'is null' check
 
     static class LocalizationUtils
     {
