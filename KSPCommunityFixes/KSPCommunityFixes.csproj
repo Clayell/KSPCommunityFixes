@@ -94,6 +94,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="BasePatch.cs" />
+    <Compile Include="Performance\MemoryLeaks.cs" />
     <Compile Include="BugFixes\RescaledRoboticParts.cs" />
     <Compile Include="BugFixes\StickySplashedFixer.cs" />
     <Compile Include="BugFixes\DepartmentHeadImage.cs" />
