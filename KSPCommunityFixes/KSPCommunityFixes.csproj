@@ -94,6 +94,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="BasePatch.cs" />
+    <Compile Include="BugFixes\RescaledRoboticParts.cs" />
     <Compile Include="BugFixes\StickySplashedFixer.cs" />
     <Compile Include="BugFixes\DepartmentHeadImage.cs" />
     <Compile Include="BugFixes\AsteroidSpawnerUniqueFlightId.cs" />
