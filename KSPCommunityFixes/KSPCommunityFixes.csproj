@@ -96,6 +96,7 @@
     <Compile Include="BasePatch.cs" />
     <Compile Include="BugFixes\AsteroidInfiniteMining.cs" />
     <Compile Include="BugFixes\UpgradeBugs.cs" />
+    <Compile Include="BugFixes\PartTooltipUpgradesApplyToSubstituteParts.cs" />
     <Compile Include="BugFixes\UpgradesApplyToPrefabs.cs" />
     <Compile Include="BugFixes\CometMiningNotRemovingMass.cs" />
     <Compile Include="BugFixes\EnginePlateAirstreamShieldedTopPart.cs" />
