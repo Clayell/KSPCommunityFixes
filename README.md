@@ -153,7 +153,7 @@ If doing so in the `Debug` configuration and if your KSP install is modified to 
 ### Changelog
 
 ##### 1.21.1
-- Further improve ConfigNode performance. (@NathanKell)
+- Further improve ConfigNode performance. The tunable settings blocks have been removed since base performance is high enough now. (@NathanKell)
 
 ##### 1.21.0
 - New performance / KSP bugfix patch : [PQSCoroutineLeak](https://github.com/KSPModdingLibs/KSPCommunityFixes/issues/85) (issue discovered by @Gameslinx)
