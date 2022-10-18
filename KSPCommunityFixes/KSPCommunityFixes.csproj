@@ -23,15 +23,23 @@
     <DebugType>portable</DebugType>
     <Optimize>false</Optimize>
     <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DefineConstants>DEBUG;TRACE;ENABLE_PROFILER</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <DebugType>portable</DebugType>
+    <DebugType>none</DebugType>
     <Optimize>true</Optimize>
     <OutputPath>bin\Release\</OutputPath>
     <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Profiling|AnyCPU' ">
+    <DebugType>none</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Profiling\</OutputPath>
+    <DefineConstants>TRACE;ENABLE_PROFILER</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
@@ -40,40 +48,57 @@
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <!--Parse KSP platform-specific paths and set the start action-->
   <PropertyGroup>
+    <HasProfilingPath>$(ReferencePath.Contains(';'))</HasProfilingPath>
+    <KSPRootPath Condition="'$(HasProfilingPath)' AND '$(Configuration)' == 'Profiling'">$(ReferencePath.Split(';')[1])</KSPRootPath>
+    <KSPRootPath Condition="!('$(HasProfilingPath)' AND '$(Configuration)' == 'Profiling')">$(ReferencePath.Split(';')[0])</KSPRootPath>
     <KSPExecutable Condition="$([MSBuild]::IsOsPlatform('Windows'))">KSP_x64.exe</KSPExecutable>
     <KSPExecutable Condition="$([MSBuild]::IsOsPlatform('OSX'))">KSP.app</KSPExecutable>
     <KSPExecutable Condition="$([MSBuild]::IsOsPlatform('Linux'))">KSP.x86_64</KSPExecutable>
     <ManagedRelativePath Condition="$([MSBuild]::IsOsPlatform('Windows'))">KSP_x64_Data\Managed</ManagedRelativePath>
     <ManagedRelativePath Condition="$([MSBuild]::IsOsPlatform('OSX'))">KSP.app\Contents\Resources\Data\Managed</ManagedRelativePath>
     <ManagedRelativePath Condition="$([MSBuild]::IsOsPlatform('Linux'))">KSP_Data\Managed</ManagedRelativePath>
-    <ManagedPath>$(ReferencePath)\$(ManagedRelativePath)</ManagedPath>
+    <ManagedPath>$(KSPRootPath)\$(ManagedRelativePath)</ManagedPath>
     <StartAction>Program</StartAction>
-    <StartProgram>$(ReferencePath)\$(KSPExecutable)</StartProgram>
-    <StartWorkingDirectory>$(ReferencePath)</StartWorkingDirectory>
+    <StartProgram>$(KSPRootPath)\$(KSPExecutable)</StartProgram>
+    <StartWorkingDirectory>$(KSPRootPath)</StartWorkingDirectory>
   </PropertyGroup>
-  <!--Import references-->
+  <!--Copy KSP/Mono references from the reference path -->
+  <!--This is needed so xml docs for the BCL and Unity are found by the IDE -->
+  <Target Name="CopyKSPReferences" BeforeTargets="FindReferenceAssembliesForReferences;PublicizeAssemblies" DependsOnTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(ManagedPath)\System.dll')" Text="Couldn't find KSP references. Make sure the ReferencePath '$(KSPRootPath)' is the root of your KSP install.%0aA 'ReferencePath' property must be set to the KSP install root folder in the 'KSPCommunityFixes.csproj.user' file.%0aIn most IDEs, you can set a reference path from the project properties window." />
+    <ItemGroup>
+      <KSPReference Include="$(ManagedPath)\System.dll" />
+      <KSPReference Include="$(ManagedPath)\mscorlib.dll" />
+      <KSPReference Include="$(ManagedPath)\System.Xml.dll" />
+      <KSPReference Include="$(ManagedPath)\UnityEngine*.dll" />
+      <KSPReference Include="$(ManagedPath)\Assembly-CSharp.dll" />
+      <KSPReference Include="$(ManagedPath)\Assembly-CSharp-firstpass.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(KSPReference)" DestinationFolder="$(MSBuildProjectDirectory)\LocalReferences" />
+  </Target>
+  <!--Set the actual references -->
   <ItemGroup>
-    <Reference Include="$(ManagedPath)\System.dll">
-      <Name>System (KSP/Mono)</Name>
+    <Reference Include="$(MSBuildProjectDirectory)\LocalReferences\System.dll">
+      <Name>BCL - System (KSP/Mono)</Name>
       <Private>False</Private>
     </Reference>
-    <Reference Include="$(ManagedPath)\mscorlib.dll">
-      <Name>System.Core (KSP/Mono)</Name>
+    <Reference Include="$(MSBuildProjectDirectory)\LocalReferences\mscorlib.dll">
+      <Name>BCL - mscorlib (KSP/Mono)</Name>
       <Private>False</Private>
     </Reference>
-    <Reference Include="$(ManagedPath)\System.Xml.dll">
-      <Name>System.Xml (KSP/Mono)</Name>
+    <Reference Include="$(MSBuildProjectDirectory)\LocalReferences\System.Xml.dll">
+      <Name>BCL - System.Xml (KSP/Mono)</Name>
       <Private>False</Private>
     </Reference>
-    <Reference Include="$(ManagedPath)\UnityEngine*.dll">
+    <Reference Include="$(MSBuildProjectDirectory)\LocalReferences\UnityEngine*.dll">
       <Name>UnityEngine</Name>
       <Private>False</Private>
     </Reference>
-    <Reference Include="$(ManagedPath)\Assembly-CSharp.dll">
+    <Reference Include="$(MSBuildProjectDirectory)\LocalReferences\Assembly-CSharp.dll">
       <Name>Assembly-CSharp</Name>
       <Private>False</Private>
     </Reference>
-    <Reference Include="$(ManagedPath)\Assembly-CSharp-firstpass.dll">
+    <Reference Include="$(MSBuildProjectDirectory)\LocalReferences\Assembly-CSharp-firstpass.dll">
       <Name>Assembly-CSharp-firstpass</Name>
       <Private>False</Private>
     </Reference>
@@ -133,6 +158,7 @@
     <Compile Include="Performance\PQSUpdateNoMemoryAlloc.cs" />
     <Compile Include="Performance\ProgressTrackingSpeedBoost.cs" />
     <Compile Include="QoL\AutostrutActions.cs" />
+    <Compile Include="QoL\PartTooltipEverywhere.cs" />
     <Compile Include="QoL\ToolbarShowHide.cs" />
     <Compile Include="QoL\DisableNewGameIntro.cs" />
     <Compile Include="QoL\NoIVA.cs" />
@@ -185,21 +211,21 @@
     <UpdateAssemblyVersion Path="$(MSBuildProjectDirectory)\Properties\AssemblyInfo.cs" Version="$(AVCFullVersion)" />
   </Target>
   <Target Name="AfterBuild">
-    <Error Condition="'$(ReferencePath)' == '' OR !Exists('$(ReferencePath)')" Text="ReferencePath=$(ReferencePath) os empty or isn't a valid path" />
+    <Error Condition="'$(KSPRootPath)' == '' OR !Exists('$(KSPRootPath)')" Text="ReferencePath=$(KSPRootPath) is empty or isn't a valid path" />
     <CallTarget Targets="CopyToKSP" />
     <CallTarget Targets="CopyBinariesToRepo" Condition="'$(Configuration)' == 'Release' AND '$(CopyReleaseBinariesToRepo)' == 'true'" />
     <CallTarget Targets="MakeReleaseZip" Condition="'$(Configuration)' == 'Release'" />
   </Target>
   <!--Custom targets-->
   <Target Name="CopyToKSP">
-    <RemoveDir Condition="Exists('$(ReferencePath)\GameData\$(GameDataFolderName)')" Directories="$(ReferencePath)\GameData\$(GameDataFolderName)" />
+    <RemoveDir Condition="Exists('$(KSPRootPath)\GameData\$(GameDataFolderName)')" Directories="$(KSPRootPath)\GameData\$(GameDataFolderName)" />
     <ItemGroup>
       <GameDataFiles Include="$(RepoRootPath)\GameData\**\*.*" />
     </ItemGroup>
-    <Copy SourceFiles="@(GameDataFiles)" DestinationFolder="$(ReferencePath)\GameData\%(RecursiveDir)" />
+    <Copy SourceFiles="@(GameDataFiles)" DestinationFolder="$(KSPRootPath)\GameData\%(RecursiveDir)" />
     <PropertyGroup>
-      <BinariesKSPGameDataPath Condition="'$(UsePluginsFolder)' == 'true'">$(ReferencePath)\GameData\$(GameDataFolderName)\Plugins</BinariesKSPGameDataPath>
-      <BinariesKSPGameDataPath Condition="'$(UsePluginsFolder)' == 'false'">$(ReferencePath)\GameData\$(GameDataFolderName)</BinariesKSPGameDataPath>
+      <BinariesKSPGameDataPath Condition="'$(UsePluginsFolder)' == 'true'">$(KSPRootPath)\GameData\$(GameDataFolderName)\Plugins</BinariesKSPGameDataPath>
+      <BinariesKSPGameDataPath Condition="'$(UsePluginsFolder)' == 'false'">$(KSPRootPath)\GameData\$(GameDataFolderName)</BinariesKSPGameDataPath>
     </PropertyGroup>
     <ItemGroup>
       <BinariesToCopy Include="$(TargetDir)\*.*" />

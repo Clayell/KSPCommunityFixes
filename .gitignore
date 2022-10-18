@@ -346,3 +346,7 @@ KSPDevPath.xml
 
 # Binaries
 GameData/KSPCommunityFixes/Plugins/*
+
+# Imported references
+
+KSPCommunityFixes/LocalReferences/*.dll
