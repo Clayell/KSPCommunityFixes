@@ -24,7 +24,10 @@
     <DebugSymbols>true</DebugSymbols>
     <DebugType>portable</DebugType>
     <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>DEBUG;TRACE;ENABLE_PROFILER</DefineConstants>
+    <DefineConstants>TRACE;DEBUG;ENABLE_PROFILER</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
     <DebugType>portable</DebugType>
@@ -105,6 +108,7 @@
     <Compile Include="BugFixes\DoubleCurvePreserveTangents.cs" />
     <Compile Include="BugFixes\RestoreMaxPhysicsDT.cs" />
     <Compile Include="Performance\CommNetThrottling.cs" />
+    <Compile Include="Performance\ContractProgressEnumCache.cs" />
     <Compile Include="Performance\DisableMapUpdateInFlight.cs" />
     <Compile Include="Performance\CommNetSpeedBoost.cs" />
     <Compile Include="Performance\MemoryLeaks.cs" />
