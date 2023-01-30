@@ -11,7 +11,6 @@
     <RootNamespace>KSPCommunityFixes</RootNamespace>
     <AssemblyName>KSPCommunityFixes</AssemblyName>
     <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
-    <LangVersion>7.3</LangVersion>
     <FileAlignment>512</FileAlignment>
     <Deterministic>true</Deterministic>
     <PlatformTarget>x64</PlatformTarget>
@@ -20,9 +19,9 @@
     </NuGetPackageImportStamp>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
-    <Optimize>false</Optimize>
     <DebugSymbols>true</DebugSymbols>
     <DebugType>portable</DebugType>
+    <Optimize>false</Optimize>
     <OutputPath>bin\Debug\</OutputPath>
     <DefineConstants>TRACE;DEBUG;ENABLE_PROFILER</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
@@ -30,15 +29,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <OutputPath>bin\Release\</OutputPath>
     <DebugType>portable</DebugType>
-    <DefineConstants>TRACE</DefineConstants>
-    <Optimize>true</Optimize>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Profiling|AnyCPU'">
-    <OutputPath>bin\Profiling\</OutputPath>
-    <DebugType>portable</DebugType>
-    <DefineConstants>TRACE;ENABLE_PROFILER</DefineConstants>
     <Optimize>true</Optimize>
     <OutputPath>bin\Release\</OutputPath>
     <DefineConstants>TRACE</DefineConstants>
@@ -111,7 +102,6 @@
     <Compile Include="BugFixes\MapSOCorrectWrapping.cs" />
     <Compile Include="BugFixes\UpgradeBugs.cs" />
     <Compile Include="BugFixes\PartTooltipUpgradesApplyToSubstituteParts.cs" />
-    <Compile Include="BugFixes\UpgradesApplyToPrefabs.cs" />
     <Compile Include="BugFixes\CometMiningNotRemovingMass.cs" />
     <Compile Include="BugFixes\EnginePlateAirstreamShieldedTopPart.cs" />
     <Compile Include="BugFixes\StrategyDuration.cs" />
@@ -124,12 +114,11 @@
     <Compile Include="Performance\CommNetThrottling.cs" />
     <Compile Include="Performance\ContractProgressEnumCache.cs" />
     <Compile Include="Performance\DisableMapUpdateInFlight.cs" />
-    <Compile Include="Performance\CommNetSpeedBoost.cs" />
     <Compile Include="Performance\FastLoader.cs" />
     <Compile Include="Performance\MemoryLeaks.cs" />
     <Compile Include="BugFixes\RescaledRoboticParts.cs" />
+    <Compile Include="Modding\DepartmentHeadImage.cs" />
     <Compile Include="BugFixes\StickySplashedFixer.cs" />
-    <Compile Include="BugFixes\DepartmentHeadImage.cs" />
     <Compile Include="BugFixes\AsteroidSpawnerUniqueFlightId.cs" />
     <Compile Include="BugFixes\AutoStrutDrift.cs" />
     <Compile Include="BugFixes\DockingPortRotationDriftAndFixes.cs" />
@@ -138,7 +127,6 @@
     <Compile Include="BugFixes\EVAKerbalRecovery.cs" />
     <Compile Include="BugFixes\KerbalTooltipMaxSustainedG.cs" />
     <Compile Include="BugFixes\LostSoundAfterSceneSwitch.cs" />
-    <Compile Include="BugFixes\GetPotentialTorqueFixes.cs" />
     <Compile Include="BugFixes\PackedPartsRotation.cs" />
     <Compile Include="BugFixes\PartListTooltipIconSpin.cs" />
     <Compile Include="BugFixes\PartStartStability.cs" />
@@ -148,10 +136,6 @@
     <Compile Include="BugFixes\ScatterDistribution.cs" />
     <Compile Include="BugFixes\StockAlarmDescPreserveLineBreak.cs" />
     <Compile Include="GlobalSuppressions.cs" />
-    <Compile Include="Internal\EditorPhysics.cs" />
-    <Compile Include="Modding\BaseFieldListUseFieldHost.cs" />
-    <Compile Include="Performance\NoLiftInSpace.cs" />
-    <Compile Include="QoL\BetterSAS.cs" />
     <Compile Include="Modding\PersistentIConfigNode.cs" />
     <Compile Include="Modding\DockingPortLockedEvents.cs" />
     <Compile Include="Modding\OnSymmetryFieldChanged.cs" />
@@ -165,7 +149,6 @@
     <Compile Include="QoL\ToolbarShowHide.cs" />
     <Compile Include="QoL\DisableNewGameIntro.cs" />
     <Compile Include="QoL\NoIVA.cs" />
-    <Compile Include="QoL\BetterSAS.cs" />
     <Compile Include="Performance\OnDemandPartBuoyancy.cs" />
     <Compile Include="Performance\SceneLoadSpeedBoost.cs" />
     <Compile Include="Internal\PatchSettings.cs" />
@@ -174,7 +157,6 @@
     <Compile Include="QoL\ShowContractFinishDates.cs" />
     <Compile Include="QoL\DisableManeuverTool.cs" />
     <Compile Include="QoL\FairingMouseOverPersistence.cs" />
-    <Compile Include="QoL\RCSLimiter.cs" />
     <Compile Include="QoL\TweakableWheelsAutostrut.cs" />
     <Compile Include="BugFixes\FlightSceneLoadKraken.cs" />
     <Compile Include="BugFixes\KerbalInventoryPersistence.cs" />
@@ -194,6 +176,12 @@
     <Compile Include="Library\System.Buffers\Utilities.cs" />
     <Compile Include="Library\UnityObjectExtensions.cs" />
     <Compile Include="Library\StaticHelpers.cs" />
+    <Compile Include="BugFixes\GetPotentialTorqueFixes.cs" />
+    <Compile Include="Internal\EditorPhysics.cs" />
+    <Compile Include="Modding\BaseFieldListUseFieldHost.cs" />
+    <Compile Include="Performance\NoLiftInSpace.cs" />
+    <Compile Include="QoL\BetterSAS.cs" />
+    <Compile Include="QoL\RCSLimiter.cs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\MultipleModuleInPartAPI\MultipleModuleInPartAPI.csproj">
